@@ -14,6 +14,7 @@
 -behaviour(gen_mod).
 
 -export([start/2, loop/1, stop/1, mod_opt_type/1, get_statistic/2,
+	 received_response/3,
 	 %% Commands
 	 getstatsdx/1, getstatsdx/2,
 	 get_top_users/2,
@@ -22,14 +23,14 @@
 	 web_menu_node/3, web_page_node/5,
 	 web_menu_host/3, web_page_host/3,
 	 %% Hooks
-	 register_user/2, remove_user/2, user_send_packet/4,
-         user_send_packet_traffic/4, user_receive_packet_traffic/5,
+	 register_user/2, remove_user/2, user_send_packet/1,
+         user_send_packet_traffic/1, user_receive_packet_traffic/1,
 	 %%user_logout_sm/3,
 	 user_login/1, user_logout/4]).
 
 -include("ejabberd.hrl").
 -include("ejabberd_commands.hrl").
--include("jlib.hrl").
+-include("xmpp.hrl").
 -include("logger.hrl").
 -include("mod_roster.hrl").
 -include("ejabberd_http.hrl").
@@ -88,7 +89,11 @@ mod_opt_type(_) -> [hooks].
 %%% +++ TODO: why server and "server"
 table_name(server) -> gen_mod:get_module_proc(<<"server">>, mod_statsdx);
 table_name("server") -> gen_mod:get_module_proc(<<"server">>, mod_statsdx);
-table_name(Host) -> gen_mod:get_module_proc(Host, mod_statsdx).
+table_name(Host) -> gen_mod:get_module_proc(tob(Host), mod_statsdx).
+
+tob(A) when is_atom(A) -> A;
+tob(B) when is_binary(B) -> B;
+tob(L) when is_list(L) -> list_to_binary(L).
 
 initialize_stats_server() ->
     register(?PROCNAME, spawn(?MODULE, loop, [[]])).
@@ -172,7 +177,7 @@ prepare_stats_host(Host, Hooks, CD) ->
 	true ->
 	    ejabberd_hooks:add(register_user, Host, ?MODULE, register_user, 90),
 	    ejabberd_hooks:add(remove_user, Host, ?MODULE, remove_user, 90),
-	    ejabberd_hooks:add(user_available_hook, Host, ?MODULE, user_login, 90),
+	    ejabberd_hooks:add(c2s_session_opened, Host, ?MODULE, user_login, 90),
 	    ejabberd_hooks:add(unset_presence_hook, Host, ?MODULE, user_logout, 90),
 	    %%ejabberd_hooks:add(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
 	    ejabberd_hooks:add(user_send_packet, Host, ?MODULE, user_send_packet, 90);
@@ -181,7 +186,7 @@ prepare_stats_host(Host, Hooks, CD) ->
 	    ejabberd_hooks:add(user_send_packet, Host, ?MODULE, user_send_packet_traffic, 92),
 	    ejabberd_hooks:add(register_user, Host, ?MODULE, register_user, 90),
 	    ejabberd_hooks:add(remove_user, Host, ?MODULE, remove_user, 90),
-	    ejabberd_hooks:add(user_available_hook, Host, ?MODULE, user_login, 90),
+	    ejabberd_hooks:add(c2s_session_opened, Host, ?MODULE, user_login, 90),
 	    ejabberd_hooks:add(unset_presence_hook, Host, ?MODULE, user_logout, 90),
 	    %%ejabberd_hooks:add(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
 	    ejabberd_hooks:add(user_send_packet, Host, ?MODULE, user_send_packet, 90);
@@ -200,7 +205,7 @@ finish_stats() ->
     catch ets:delete(Table).
 
 finish_stats(Host) ->
-    ejabberd_hooks:delete(user_available_hook, Host, ?MODULE, user_login, 90),
+    ejabberd_hooks:delete(c2s_session_opened, Host, ?MODULE, user_login, 90),
     ejabberd_hooks:delete(unset_presence_hook, Host, ?MODULE, user_logout, 90),
     %%ejabberd_hooks:delete(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
     ejabberd_hooks:delete(user_send_packet, Host, ?MODULE, user_send_packet, 90),
@@ -229,49 +234,53 @@ remove_user(_User, Host) ->
     ets:update_counter(TableHost, {remove_user, Host}, 1),
     ets:update_counter(TableServer, {remove_user, server}, 1).
 
-user_send_packet(NewEl, _C2SState, FromJID, ToJID) ->
+user_send_packet({NewEl, C2SState}) ->
+    FromJID = xmpp:get_from(NewEl),
+    ToJID = xmpp:get_from(NewEl),
     %% Registrarse para tramitar Host/mod_stats2file
     case catch binary_to_existing_atom(ToJID#jid.lresource, utf8) of
 	?MODULE -> received_response(FromJID, ToJID, NewEl);
 	_ -> ok
     end,
-    NewEl.
+    {NewEl, C2SState}.
 
-user_send_packet_traffic(NewEl, _C2SState, FromJID, ToJID) ->
-    %% Only required for traffic stats
-    Host = FromJID#jid.lserver,
-    HostTo = ToJID#jid.lserver,
-    {xmlel, Type, _, _} = NewEl,
-    Type2 = case Type of
-    		<<"iq">> -> iq;
-    		<<"message">> -> message;
-    		<<"presence">> -> presence
-    	    end,
+%% Only required for traffic stats
+user_send_packet_traffic({NewEl, _C2SState} = Acc) ->
+    From = xmpp:get_from(NewEl),
+    To = xmpp:get_to(NewEl),
+    Host = From#jid.lserver,
+    HostTo = To#jid.lserver,
+    Type2 = case NewEl of
+		#iq{} -> iq;
+		#message{} -> message;
+		#presence{} -> presence
+	    end,
     Dest = case is_host(HostTo, Host) of
     	       true -> in;
     	       false -> out
     	   end,
     Table = table_name(Host),
-    ets:update_counter(Table, {send, Host, Type2, Dest}, 1),
-    NewEl.
+    ets:update_counter(Table, {send, tob(Host), Type2, Dest}, 1),
+    Acc.
 
 %% Only required for traffic stats
-user_receive_packet_traffic(FixedPacket, _C2SState, _JID, From, To) ->
+user_receive_packet_traffic({NewEl, _C2SState} = Acc) ->
+    From = xmpp:get_from(NewEl),
+    To = xmpp:get_to(NewEl),
     HostFrom = From#jid.lserver,
     Host = To#jid.lserver,
-    {xmlel, Type, _, _} = FixedPacket,
-    Type2 = case Type of
-		<<"iq">> -> iq;
-		<<"message">> -> message;
-		<<"presence">> -> presence
+    Type2 = case NewEl of
+		#iq{} -> iq;
+		#message{} -> message;
+		#presence{} -> presence
 	    end,
     Dest = case is_host(HostFrom, Host) of
 	       true -> in;
 	       false -> out
 	   end,
     Table = table_name(Host),
-    ets:update_counter(Table, {recv, Host, Type2, Dest}, 1),
-    FixedPacket.
+    ets:update_counter(Table, {recv, tob(Host), Type2, Dest}, 1),
+    Acc.
 
 
 %%%==================================
@@ -312,16 +321,16 @@ get(_, [{"cpu_util_nice_user", _}, title]) -> "CPU utilization - nice_user";
 get(_, [{"cpu_util_kernel", _}, title]) -> "CPU utilization - kernel";
 get(_, [{"cpu_util_wait", _}, title]) -> "CPU utilization - wait";
 get(_, [{"cpu_util_idle", _}, title]) -> "CPU utilization - idle";
-get(_, [{"cpu_util_user", U}]) -> proplists:get_value(user, element(2, U), -1);
-get(_, [{"cpu_util_nice_user", U}]) -> proplists:get_value(nice_user, element(2, U), -1);
-get(_, [{"cpu_util_kernel", U}]) -> proplists:get_value(kernel, element(2, U), -1);
-get(_, [{"cpu_util_wait", U}]) -> proplists:get_value(wait, element(3, U), -1);
-get(_, [{"cpu_util_idle", U}]) -> proplists:get_value(idle, element(3, U), -1);
+get(_, [{"cpu_util_user", U}]) -> U;
+get(_, [{"cpu_util_nice_user", U}]) -> U;
+get(_, [{"cpu_util_kernel", U}]) -> U;
+get(_, [{"cpu_util_wait", U}]) -> U;
+get(_, [{"cpu_util_idle", U}]) -> U;
 
 get(_, [{"client", Id}, title]) -> atom_to_list(Id);
 get(_, [{"client", Id}, Host]) ->
     Table = table_name(Host),
-    case ets:lookup(Table, {client, Host, Id}) of
+    case ets:lookup(Table, {client, tob(Host), Id}) of
 	[{_, C}] -> C;
 	[] -> 0
     end;
@@ -337,7 +346,7 @@ get(N, ["client", Host]) ->
 
 get(_, [{"os", Id}, title]) -> atom_to_list(Id);
 get(_, [{"os", _Id}, list]) -> lists:usort(list_elem(oss, id));
-get(_, [{"os", Id}, Host]) -> [{_, C}] = ets:lookup(table_name(Host), {os, Host, Id}), C;
+get(_, [{"os", Id}, Host]) -> [{_, C}] = ets:lookup(table_name(Host), {os, tob(Host), Id}), C;
 get(_, ["os", title]) -> "Operating System";
 get(N, ["os", Host]) ->
     lists:map(
@@ -367,15 +376,15 @@ get(_, [{"memsup_free", _}, title]) -> "Memory free (bytes)";
 get(_, [{"memsup_free", M}]) -> proplists:get_value(free_memory, M, -1);
 
 get(_, [{"user_login", _}, title]) -> "Logins (per minute)";
-get(_, [{"user_login", I}, Host]) -> get_stat({user_login, Host}, I);
+get(_, [{"user_login", I}, Host]) -> get_stat({user_login, tob(Host)}, I);
 get(_, [{"user_logout", _}, title]) -> "Logouts (per minute)";
-get(_, [{"user_logout", I}, Host]) -> get_stat({user_logout, Host}, I);
+get(_, [{"user_logout", I}, Host]) -> get_stat({user_logout, tob(Host)}, I);
 get(_, [{"register_user", _}, title]) -> "Accounts registered (per minute)";
-get(_, [{"register_user", I}, Host]) -> get_stat({register_user, Host}, I);
+get(_, [{"register_user", I}, Host]) -> get_stat({register_user, tob(Host)}, I);
 get(_, [{"remove_user", _}, title]) -> "Accounts deleted (per minute)";
-get(_, [{"remove_user", I}, Host]) -> get_stat({remove_user, Host}, I);
+get(_, [{"remove_user", I}, Host]) -> get_stat({remove_user, tob(Host)}, I);
 get(_, [{Table, Type, Dest, _}, title]) -> filename:flatten([Table, Type, Dest]);
-get(_, [{Table, Type, Dest, I}, Host]) -> get_stat({Table, Host, Type, Dest}, I);
+get(_, [{Table, Type, Dest, I}, Host]) -> get_stat({Table, tob(Host), Type, Dest}, I);
 
 get(_, ["user_login", title]) -> "Logins";
 get(_, ["user_login", Host]) -> get_stat({user_login, Host});
@@ -386,7 +395,7 @@ get(_, ["register_user", Host]) -> get_stat({register_user, Host});
 get(_, ["remove_user", title]) -> "Accounts deleted";
 get(_, ["remove_user", Host]) -> get_stat({remove_user, Host});
 get(_, [{Table, Type, Dest}, title]) -> filename:flatten([Table, Type, Dest]);
-get(_, [{Table, Type, Dest}, Host]) -> get_stat({Table, Host, Type, Dest});
+get(_, [{Table, Type, Dest}, Host]) -> get_stat({Table, tob(Host), Type, Dest});
 
 get(_, ["localtime", title]) -> "Local time";
 get(N, ["localtime"]) ->
@@ -448,7 +457,7 @@ get(_, ["sslusers", title]) -> "SSL users";
 get(_, ["sslusers"]) -> {_, _, R} = get_connectiontype(), R;
 get(_, ["registeredusers", title]) -> "Registered users";
 get(N, ["registeredusers"]) -> rpc:call(N, mnesia, table_info, [passwd, size]);
-get(_, ["registeredusers", Host]) -> length(ejabberd_auth:get_vh_registered_users(Host));
+get(_, ["registeredusers", Host]) -> ejabberd_auth:count_users(Host);
 get(_, ["onlineusers", title]) -> "Online users";
 get(N, ["onlineusers"]) -> rpc:call(N, mnesia, table_info, [session, size]);
 get(_, ["onlineusers", Host]) -> length(ejabberd_sm:get_vh_session_list(Host));
@@ -739,13 +748,11 @@ ms_to_time(T) ->
 
 
 %% Cuando un usuario conecta, pedirle iq:version a nombre de Host/mod_stats2file
-user_login(U) ->
-    User = U#jid.luser,
-    Host = U#jid.lserver,
-    Resource = U#jid.lresource,
+user_login(#{user := User, lserver := Host, resource := Resource} = State) ->
     ets:update_counter(table_name(server), {user_login, server}, 1),
     ets:update_counter(table_name(Host), {user_login, Host}, 1),
-    request_iqversion(User, Host, Resource).
+    request_iqversion(User, Host, Resource),
+    State.
 
 
 %%user_logout_sm(_, JID, _Data) ->
@@ -779,16 +786,22 @@ user_logout(User, Host, Resource, _Status) ->
     end.
 
 request_iqversion(User, Host, Resource) ->
-    From = jlib:make_jid(<<"">>, Host, list_to_binary(atom_to_list(?MODULE))),
-    FromStr = jlib:jid_to_string(From),
-    To = jlib:make_jid(User, Host, Resource),
-    ToStr = jlib:jid_to_string(To),
-    Packet = {xmlel,<<"iq">>,
-	      [{<<"from">>,FromStr}, {<<"to">>,ToStr}, {<<"type">>,<<"get">>},
-		{<<"id">>, list_to_binary("statsdx"++randoms:get_string())}],
-	      [{xmlel, <<"query">>,
-		[{<<"xmlns">>,<<"jabber:iq:version">>}], []}]},
-    ejabberd_local:route(From, To, Packet).
+    From = jid:make(<<"">>, Host, list_to_binary(atom_to_list(?MODULE))),
+    To = jid:make(User, Host, Resource),
+    Query = #xmlel{name = <<"query">>, attrs = [{<<"xmlns">>, ?NS_VERSION}]},
+    IQ = #iq{type = get,
+             from = From,
+             to = To,
+             id = randoms:get_string(),
+             sub_els = [Query]},
+    HandleResponse = fun(#iq{type = result} = IQr) ->
+			       spawn(?MODULE, received_response,
+				     [To, From, IQr]);
+			  (R) ->
+			       ?INFO_MSG("Unexpected response: ~n~p", [R]),
+			       ok % Hmm.
+		       end,
+    ejabberd_router:route_iq(IQ, HandleResponse).
 
 %% cuando el virtualJID recibe una respuesta iqversion,
 %% almacenar su JID/USR + client + OS en una tabla
@@ -797,13 +810,13 @@ received_response(From, _To, El) ->
     catch
     	_:_ -> ok
     end.
-received_response(From, {xmlel, <<"iq">>, Attrs, Elc}) ->
+received_response(From, #iq{type = Type, lang = Lang1, sub_els = Elc}) ->
     User = From#jid.luser,
     Host = From#jid.lserver,
     Resource = From#jid.lresource,
 
-    <<"result">> = fxml:get_attr_s(<<"type">>, Attrs),
-    Lang = case fxml:get_attr_s(<<"xml:lang">>, Attrs) of
+    result = Type,
+    Lang = case Lang1 of
 	       <<"">> -> "unknown";
 	       L -> binary_to_list(L)
 	   end,
@@ -840,7 +853,8 @@ received_response(From, {xmlel, <<"iq">>, Attrs, Elc}) ->
     ets:insert(TableHost, {{session, JID}, Client_id, OS_id, Lang, ConnType, Client, Version, OS}).
 
 get_connection_type(User, Host, Resource) ->
-    [_Node, {conn, Conn}, _IP] = ejabberd_sm:get_user_info(User, Host, Resource),
+    UserInfo = ejabberd_sm:get_user_info(User, Host, Resource),
+    {conn, Conn} = lists:keyfind(conn, 1, UserInfo),
     Conn.
 
 update_counter_create(Table, Element, C) ->

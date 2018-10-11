@@ -30,14 +30,28 @@
          opt_type/1,
          stop/1]).
 
--include("ejabberd.hrl").
+-include("scram.hrl").
 -include("logger.hrl").
 
 %%%----------------------------------------------------------------------
 %%% API
 %%%----------------------------------------------------------------------
 
-opt_type(auth_opts) -> fun (V) -> V end;
+opt_type(auth_opts) ->
+    fun(L) ->
+            lists:map(
+              fun({host, V}) when is_binary(V) ->
+                      {host, V};
+                 ({connection_pool_size, V}) when is_integer(V) ->
+                      {connection_pool_size, V};
+                 ({connection_opts, V}) when is_list(V) ->
+                      {connection_opts, V};
+                 ({basic_auth, V}) when is_binary(V) ->
+                      {basic_auth, V};
+                 ({path_prefix, V}) when is_binary(V) ->
+                      {path_prefix, V}
+              end, L)
+    end;
 opt_type(_) -> [auth_opts].
 
 -spec start(binary()) -> ok.

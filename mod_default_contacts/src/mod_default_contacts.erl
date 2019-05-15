@@ -1,8 +1,8 @@
 %%%----------------------------------------------------------------------
-%%% File    : mod_default_rooms.erl
+%%% File    : mod_default_contacts.erl
 %%% Author  : Holger Weiss <holger@zedat.fu-berlin.de>
-%%% Purpose : Auto-bookmark rooms on registration
-%%% Created : 27 Feb 2019 by Holger Weiss <holger@zedat.fu-berlin.de>
+%%% Purpose : Auto-add contacts on registration
+%%% Created : 14 May 2019 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
 %%% ejabberd, Copyright (C) 2019   ProcessOne
@@ -23,7 +23,7 @@
 %%%
 %%%----------------------------------------------------------------------
 
--module(mod_default_rooms).
+-module(mod_default_contacts).
 -author('holger@zedat.fu-berlin.de').
 -behavior(gen_mod).
 
@@ -52,37 +52,31 @@ reload(_Host, _NewOpts, _OldOpts) ->
     ok.
 
 -spec mod_opt_type(atom()) -> fun((term()) -> term()).
-mod_opt_type(auto_join) ->
-    fun (B) when is_boolean(B) -> B end;
-mod_opt_type(rooms) ->
-    fun (Rs) -> [jid:decode(iolist_to_binary(R)) || R <- Rs] end.
+mod_opt_type(contacts) ->
+    fun (L) ->
+	    lists:map(fun (Opts) ->
+			      JID1 = proplists:get_value(jid, Opts),
+			      JID2 = iolist_to_binary(JID1),
+			      JID3 = jid:decode(JID2),
+			      Name1 = proplists:get_value(name, Opts, <<>>),
+			      Name2 = iolist_to_binary(Name1),
+			      #roster_item{jid = JID3, name = Name2}
+		      end, L)
+    end.
 
 -spec mod_options(binary()) -> [{atom(), any()}].
 mod_options(_Host) ->
-    [{auto_join, true},
-     {rooms, []}].
+    [{contacts, []}].
 
 -spec depends(binary(), gen_mod:opts()) -> [{module(), hard | soft}].
 depends(_Host, _Opts) ->
-    [{mod_private, hard}].
+    [{mod_roster, hard}].
 
 %%--------------------------------------------------------------------
 %% ejabberd_hooks callbacks.
 %%--------------------------------------------------------------------
--spec register_user(binary(), binary()) -> ok | {error, _}.
+-spec register_user(binary(), binary()) -> any().
 register_user(LUser, LServer) ->
-    JID = jid:make(LUser, LServer),
-    Rooms = gen_mod:get_module_opt(LServer, ?MODULE, rooms),
-    AutoJoin = gen_mod:get_module_opt(LServer, ?MODULE, auto_join),
-    Bookmarks = [build_bookmark(Room, AutoJoin) || Room <- Rooms],
-    BookmarkStorage = #bookmark_storage{conference = Bookmarks},
-    Data = [{?NS_STORAGE_BOOKMARKS, xmpp:encode(BookmarkStorage)}],
-    ?DEBUG("Auto-creating bookmarks for ~s@~s", [LUser, LServer]),
-    mod_private:set_data(JID, Data).
-
-%%--------------------------------------------------------------------
-%% Internal functions.
-%%--------------------------------------------------------------------
--spec build_bookmark(jid(), boolean()) -> bookmark_storage().
-build_bookmark(Room, AutoJoin) ->
-    #bookmark_conference{jid = Room, autojoin = AutoJoin}.
+    ?DEBUG("Auto-creating roster entries for ~s@~s", [LUser, LServer]),
+    Items = gen_mod:get_module_opt(LServer, ?MODULE, contacts),
+    mod_roster:set_items(LUser, LServer, #roster_query{items = Items}).

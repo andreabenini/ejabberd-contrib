@@ -7,8 +7,9 @@
 	DESCRIPTION
 	-----------
 
-This module allows for specifying one or more rooms that should be bookmarked
-automatically on successful registration via `mod_register`.
+This module allows for specifying one or more rooms that should be
+bookmarked automatically on successful user registration (via
+"mod_register", or, for example, "ejabberdctl register").
 
 
 	CONFIGURATION
@@ -21,10 +22,10 @@ following:
     # [...]
     mod_default_rooms:
       rooms:
-        - "foo@conference.@HOST@"
-        - "bar@conference.@HOST@"
+        - "foo@conference.example.net"
+        - "bar@conference.example.org"
 
-The configurable mod_deny_omemo options are:
+The configurable mod_default_rooms options are:
 
 - rooms (default: [])
 

@@ -59,7 +59,6 @@
 -include("logger.hrl").
 -include("xmpp.hrl").
 
--define(SPAM_FILTER_CACHE, spam_filter_cache).
 -define(COMMAND_TIMEOUT, timer:seconds(30)).
 
 -type url() :: binary().
@@ -250,8 +249,7 @@ handle_cast({reload, NewOpts, OldOpts}, #state{host = Host} = State) ->
     {_Result, State3} = reload_files(JIDsFile, URLsFile, State2),
     {noreply, State3};
 handle_cast(reopen_log, State) ->
-    close_dump_file(State),
-    {noreply, open_dump_file(State)};
+    {noreply, reopen_dump_file(State)};
 handle_cast(Request, State) ->
     ?ERROR_MSG("Got unexpected request from: ~p", [Request]),
     {noreply, State}.
@@ -264,13 +262,20 @@ handle_info(Info, State) ->
 -spec terminate(normal | shutdown | {shutdown, term()} | term(), state()) -> ok.
 terminate(Reason, #state{host = Host} = State) ->
     ?DEBUG("Stopping spam filter process for ~s: ~p", [Host, Reason]),
-    close_dump_file(State),
-    ejabberd_hooks:delete(reopen_log_hook, ?MODULE,
-			  reopen_log, 50),
+    DumpFile = gen_mod:get_module_opt(Host, ?MODULE, spam_dump_file),
+    DumpFile1 = expand_host(DumpFile, Host),
+    close_dump_file(DumpFile1, State),
     ejabberd_hooks:delete(s2s_receive_packet, Host, ?MODULE,
 			  s2s_receive_packet, 50),
     ejabberd_hooks:delete(s2s_in_handle_info, Host, ?MODULE,
-			  s2s_in_handle_info, 90).
+			  s2s_in_handle_info, 90),
+    case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
+	false ->
+	    ejabberd_hooks:delete(reopen_log_hook, ?MODULE,
+				  reopen_log, 50);
+	true ->
+	    ok
+    end.
 
 -spec code_change({down, term()} | term(), state(), term()) -> {ok, state()}.
 code_change(_OldVsn, #state{host = Host} = State, _Extra) ->
@@ -559,12 +564,6 @@ reject(#presence{from = From, to = To, lang = Lang} = Presence) ->
 reject(_) ->
     ok.
 
--spec open_dump_file(state()) -> state().
-open_dump_file(#state{host = Host} = State) ->
-    DumpFile = gen_mod:get_module_opt(Host, ?MODULE, spam_dump_file),
-    DumpFile1 = expand_host(DumpFile, Host),
-    open_dump_file(DumpFile1, State).
-
 -spec open_dump_file(filename(), state()) -> state().
 open_dump_file(none, State) ->
     State#state{dump_fd = undefined};
@@ -579,13 +578,7 @@ open_dump_file(Name, State) ->
 	    State#state{dump_fd = undefined}
     end.
 
--spec close_dump_file(state()) -> ok.
-close_dump_file(#state{host = Host} = State) ->
-    DumpFile = gen_mod:get_module_opt(Host, ?MODULE, spam_dump_file),
-    DumpFile1 = expand_host(DumpFile, Host),
-    close_dump_file(DumpFile1, State).
-
--spec close_dump_file(binary(), state()) -> ok.
+-spec close_dump_file(filename(), state()) -> ok.
 close_dump_file(_Name, #state{dump_fd = undefined}) ->
     ok;
 close_dump_file(Name, #state{dump_fd = Fd}) ->
@@ -595,6 +588,13 @@ close_dump_file(Name, #state{dump_fd = Fd}) ->
 	{error, Reason} ->
 	    ?ERROR_MSG("Cannot close ~s: ~s", [Name, file:format_error(Reason)])
     end.
+
+-spec reopen_dump_file(state()) -> state().
+reopen_dump_file(#state{host = Host} = State) ->
+    DumpFile = gen_mod:get_module_opt(Host, ?MODULE, spam_dump_file),
+    DumpFile1 = expand_host(DumpFile, Host),
+    close_dump_file(DumpFile1, State),
+    open_dump_file(DumpFile1, State).
 
 -spec maybe_dump_spam(message()) -> ok.
 maybe_dump_spam(#message{to = #jid{lserver = LServer}} = Msg) ->

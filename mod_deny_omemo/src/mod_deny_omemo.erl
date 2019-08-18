@@ -5,7 +5,7 @@
 %%% Created : 18 Mar 2018 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2018   ProcessOne
+%%% ejabberd, Copyright (C) 2018-2019   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -64,9 +64,9 @@ stop(Host) ->
 reload(_Host, _NewOpts, _OldOpts) ->
     ok.
 
--spec mod_opt_type(atom()) -> fun((term()) -> term()).
+-spec mod_opt_type(atom()) -> econf:validator().
 mod_opt_type(access) ->
-    fun acl:access_rules_validator/1.
+    econf:acl().
 
 -spec mod_options(binary()) -> [{atom(), any()}].
 mod_options(_Host) ->

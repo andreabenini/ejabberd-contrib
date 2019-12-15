@@ -10,11 +10,9 @@
 
 -behaviour(gen_mod).
 
--export([
-	 start/2,
-	 stop/1,
-	 process/2
-	]).
+-export([start/2, stop/1, depends/2, mod_options/1]).
+
+-export([process/2]).
 
 -include("xmpp.hrl").
 -include("ejabberd_http.hrl").
@@ -38,7 +36,7 @@ process(LocalPath, Request) ->
 	serve(LocalPath, Request).
 
 serve(LocalPathBin, #request{host = Host} = Request) ->
-	DocRoot = binary_to_list(gen_mod:get_module_opt(Host, mod_muc_log, outdir, <<"www/muc">>)),
+	DocRoot = binary_to_list(gen_mod:get_module_opt(Host, mod_muc_log, outdir)),
 	LocalPath = [binary_to_list(LPB) || LPB <- LocalPathBin],
 	FileName = filename:join(filename:split(DocRoot) ++ LocalPath),
 	case file:read_file(FileName) of
@@ -52,7 +50,8 @@ serve(LocalPathBin, #request{host = Host} = Request) ->
 		{error, eisdir} ->
 			FileNameIndex = FileName ++ "/index.html",
 			case file:read_file_info(FileNameIndex) of
-				{ok, _FileInfo} -> serve(LocalPath ++ ["index.html"], Request);
+				{ok, _FileInfo} ->
+				    serve(LocalPathBin ++ [<<"index.html">>], Request);
 				{error, _Error} -> show_dir_listing(FileName, LocalPath)
 			end;
 		{error, Error} ->
@@ -90,7 +89,7 @@ get_room_pid(Name, Host) ->
 	end.
 
 get_room_config(Room_pid) ->
-	{ok, C} = gen_fsm:sync_send_all_state_event(Room_pid, get_config),
+	{ok, C} = p1_fsm:sync_send_all_state_event(Room_pid, get_config),
 	C.
 
 
@@ -100,7 +99,7 @@ get_room_config(Room_pid) ->
 
 show_dir_listing(DirName, LocalPath) ->
 	Header = io_lib:format("Name                                               Last modified             Size Description~n", []),
-	Address = io_lib:format("<address>ejabberd/~s Server</address>", [ejabberd_config:get_version()]),
+	Address = io_lib:format("<address>ejabberd/~s Server</address>", [ejabberd_config:version()]),
 
 	{ok, Listing} = file:list_dir(DirName),
 	Listing2 = lists:sort(Listing),
@@ -230,3 +229,9 @@ start(_Host, _Opts) ->
 
 stop(_Host) ->
     ok.
+
+depends(_Host, _Opts) ->
+    [{mod_muc_log, hard}].
+
+mod_options(_Host) ->
+    [].

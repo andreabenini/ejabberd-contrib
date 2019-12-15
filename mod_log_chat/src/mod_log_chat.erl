@@ -10,13 +10,10 @@
 
 -behaviour(gen_mod).
 
--export([start/2,
-         init/1,
-	 stop/1,
-	 depends/2,
+-export([start/2, stop/1, depends/2, mod_opt_type/1, mod_options/1]).
+-export([init/1,
 	 log_packet_send/1,
-	 log_packet_receive/1,
-	 mod_opt_type/1]).
+	 log_packet_receive/1]).
 
 -ifndef(LAGER).
 -define(LAGER, 1).
@@ -33,7 +30,7 @@
 
 start(Host, Opts) ->
     ?DEBUG(" ~p  ~p~n", [Host, Opts]),
-    case gen_mod:get_opt(host_config, Opts, []) of
+    case gen_mod:get_opt(host_config, Opts) of
 	[] ->
 	    start_vh(Host, Opts);
 	HostConfig ->
@@ -51,8 +48,8 @@ start_vhs(Host, [{_VHost, _Opts}| Tail]) ->
     ?DEBUG("start_vhs ~p  ~p~n", [Host, [{_VHost, _Opts}| Tail]]),
     start_vhs(Host, Tail).
 start_vh(Host, Opts) ->
-    Path = gen_mod:get_opt(path, Opts, ?DEFAULT_PATH),
-    Format = gen_mod:get_opt(format, Opts, ?DEFAULT_FORMAT),
+    Path = gen_mod:get_opt(path, Opts),
+    Format = gen_mod:get_opt(format, Opts),
     ejabberd_hooks:add(user_send_packet, Host, ?MODULE, log_packet_send, 55),
     ejabberd_hooks:add(user_receive_packet, Host, ?MODULE, log_packet_receive, 55),
     register(gen_mod:get_module_proc(Host, ?PROCNAME),
@@ -79,10 +76,6 @@ stop(Host) ->
     gen_mod:get_module_proc(Host, ?PROCNAME) ! stop,
     ok.
 
--spec depends(binary(), gen_mod:opts()) -> [{module(), hard | soft}].
-depends(_Host, _Opts) ->
-    [].
-
 log_packet_send({Packet, C2SState}) ->
     From = xmpp:get_from(Packet),
     To = xmpp:get_to(Packet),
@@ -103,11 +96,11 @@ log_packet_receive({Packet, C2SState}) ->
 
 log_packet(From, To, #message{type = Type} = Packet, Host) ->
     case Type of
-	<<"groupchat">> -> %% mod_muc_log already does it
-	    ?DEBUG("dropping groupchat: ~s", [fxml:element_to_binary(Packet)]),
+	groupchat -> %% mod_muc_log already does it
+	    ?DEBUG("dropping groupchat: ~s", [fxml:element_to_binary(xmpp:encode(Packet))]),
 	    ok;
-	<<"error">> -> %% we don't log errors
-	    ?DEBUG("dropping error: ~s", [fxml:element_to_binary(Packet)]),
+	error -> %% we don't log errors
+	    ?DEBUG("dropping error: ~s", [fxml:element_to_binary(xmpp:encode(Packet))]),
 	    ok;
 	_ ->
 	    write_packet(From, To, Packet, Host)
@@ -123,15 +116,15 @@ write_packet(From, To, Packet, Host) ->
 	   end,
     Format = Config#config.format,
     {Subject, Body} = {case Packet#message.subject of
-			   false ->
-			       "";
+			   [] ->
+			       <<>>;
 			   SubjEl ->
 			       escape(Format, xmpp:get_text(SubjEl))
 		       end,
 		       escape(Format, xmpp:get_text(Packet#message.body))},
     case Subject == <<>> andalso Body == <<>> of
         true -> %% don't log empty messages
-            ?DEBUG("not logging empty message from ~s",[jlib:jid_to_string(From)]),
+            ?DEBUG("not logging empty message from ~s",[jid:encode(From)]),
             ok;
         false ->
 	    Path = Config#config.path,
@@ -160,7 +153,7 @@ write_packet(From, To, Packet, Host) ->
 		end,
 	    ?DEBUG("FilenameTemplate ~p~n",[FilenameTemplate]),
 	    Filename = make_filename(FilenameTemplate, [Y, M, D]),
-	    ?DEBUG("logging message from ~s into ~s~n",[jlib:jid_to_string(From), Filename]),
+	    ?DEBUG("logging message from ~s into ~s~n",[jid:encode(From), Filename]),
 	    File = case file:read_file_info(Filename) of
 		       {ok, _} ->
 			   open_logfile(Filename);
@@ -170,7 +163,7 @@ write_packet(From, To, Packet, Host) ->
 			   io:format(NewFile, Header, []),
 			   NewFile
 		   end,
-	    MessageText = case Subject == [] of
+	    MessageText = case Subject == <<>> of
 		       true ->
 			   Body;
 		       false ->
@@ -216,10 +209,7 @@ escape(html, <<>>, Acc) ->
     Acc.
 
 escape(html, Text) -> escape(html,Text,<<>>);
-escape(text, Text) ->
-    Text;
-escape(_, "") ->
-    "".
+escape(text, Text) -> Text.
 
 % return the number of occurence of Word in String
 count(String, Word) ->
@@ -286,8 +276,15 @@ css() ->
 	".messagetext {color: black; margin: 0.2em; clear: both; display: block;}~n"++
 	"//-->~n</style>~n".
 
+depends(_Host, _Opts) ->
+    [].
+
+mod_opt_type(host_config) -> econf:list(econf:any());
 mod_opt_type(path) -> fun iolist_to_binary/1;
 mod_opt_type(format) ->
-    fun (A) when is_atom(A) -> A end;
-mod_opt_type(_) ->
-    [path, format].
+    fun (A) when is_atom(A) -> A end.
+
+mod_options(_Host) ->
+    [{host_config, []},
+     {path, ?DEFAULT_PATH},
+     {format, ?DEFAULT_FORMAT}].

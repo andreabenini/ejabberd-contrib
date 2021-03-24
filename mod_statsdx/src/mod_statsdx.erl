@@ -15,6 +15,7 @@
 
 -export([start/2, stop/1, depends/2, mod_opt_type/1, mod_options/1]).
 -export([loop/1, get_statistic/2,
+	 pre_uninstall/0,
 	 received_response/3,
 	 %% Commands
 	 getstatsdx/1, getstatsdx/2,
@@ -30,7 +31,7 @@
 	 user_login/1, user_logout/4]).
 
 -include("ejabberd_commands.hrl").
--include("xmpp.hrl").
+-include_lib("xmpp/include/xmpp.hrl").
 -include("logger.hrl").
 -include("mod_roster.hrl").
 -include("ejabberd_http.hrl").
@@ -78,6 +79,10 @@ stop(Host) ->
 	undefined -> ok;
 	_ -> ?PROCNAME ! {stop, Host}
     end.
+
+pre_uninstall() ->
+    [{code:purge(M), code:delete(M)}
+     || M <- [mod_stats2file]].
 
 depends(_Host, _Opts) ->
     [].

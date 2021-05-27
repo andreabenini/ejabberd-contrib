@@ -24,11 +24,13 @@
 	 web_menu_main/2, web_page_main/2,
 	 web_menu_node/3, web_page_node/5,
 	 web_menu_host/3, web_page_host/3,
+	 web_user/4,
 	 %% Hooks
 	 register_user/2, remove_user/2, user_send_packet/1,
          user_send_packet_traffic/1, user_receive_packet_traffic/1,
 	 %%user_logout_sm/3,
-	 user_login/1, user_logout/4]).
+	 request_iqversion/3,
+	 user_login/1, user_logout/2]).
 
 -include("ejabberd_commands.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
@@ -191,7 +193,7 @@ prepare_stats_host(Host, Hooks, CD) ->
 	    ejabberd_hooks:add(register_user, Host, ?MODULE, register_user, 90),
 	    ejabberd_hooks:add(remove_user, Host, ?MODULE, remove_user, 90),
 	    ejabberd_hooks:add(c2s_session_opened, Host, ?MODULE, user_login, 90),
-	    ejabberd_hooks:add(unset_presence_hook, Host, ?MODULE, user_logout, 90),
+	    ejabberd_hooks:add(c2s_closed, Host, ?MODULE, user_logout, 90),
 	    %%ejabberd_hooks:add(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
 	    ejabberd_hooks:add(user_send_packet, Host, ?MODULE, user_send_packet, 90);
 	traffic ->
@@ -200,12 +202,13 @@ prepare_stats_host(Host, Hooks, CD) ->
 	    ejabberd_hooks:add(register_user, Host, ?MODULE, register_user, 90),
 	    ejabberd_hooks:add(remove_user, Host, ?MODULE, remove_user, 90),
 	    ejabberd_hooks:add(c2s_session_opened, Host, ?MODULE, user_login, 90),
-	    ejabberd_hooks:add(unset_presence_hook, Host, ?MODULE, user_logout, 90),
+	    ejabberd_hooks:add(c2s_closed, Host, ?MODULE, user_logout, 90),
 	    %%ejabberd_hooks:add(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
 	    ejabberd_hooks:add(user_send_packet, Host, ?MODULE, user_send_packet, 90);
 	false ->
 	    ok
     end,
+    ejabberd_hooks:add(webadmin_user, Host, ?MODULE, web_user, 50),
     ejabberd_hooks:add(webadmin_menu_host, Host, ?MODULE, web_menu_host, 50),
     ejabberd_hooks:add(webadmin_page_host, Host, ?MODULE, web_page_host, 50).
 
@@ -219,13 +222,14 @@ finish_stats() ->
 
 finish_stats(Host) ->
     ejabberd_hooks:delete(c2s_session_opened, Host, ?MODULE, user_login, 90),
-    ejabberd_hooks:delete(unset_presence_hook, Host, ?MODULE, user_logout, 90),
+    ejabberd_hooks:delete(c2s_closed, Host, ?MODULE, user_logout, 90),
     %%ejabberd_hooks:delete(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
     ejabberd_hooks:delete(user_send_packet, Host, ?MODULE, user_send_packet, 90),
     ejabberd_hooks:delete(user_send_packet, Host, ?MODULE, user_send_packet_traffic, 92),
     ejabberd_hooks:delete(user_receive_packet, Host, ?MODULE, user_receive_packet_traffic, 92),
     ejabberd_hooks:delete(register_user, Host, ?MODULE, register_user, 90),
     ejabberd_hooks:delete(remove_user, Host, ?MODULE, remove_user, 90),
+    ejabberd_hooks:delete(webadmin_user, Host, ?MODULE, web_user, 50),
     ejabberd_hooks:delete(webadmin_menu_host, Host, ?MODULE, web_menu_host, 50),
     ejabberd_hooks:delete(webadmin_page_host, Host, ?MODULE, web_page_host, 50),
     Table = table_name(Host),
@@ -764,7 +768,8 @@ ms_to_time(T) ->
 user_login(#{user := User, lserver := Host, resource := Resource} = State) ->
     ets:update_counter(table_name(server), {user_login, server}, 1),
     ets:update_counter(table_name(Host), {user_login, Host}, 1),
-    request_iqversion(User, Host, Resource),
+    timer:apply_after(timer:seconds(5), ?MODULE,
+                      request_iqversion, [User, Host, Resource]),
     State.
 
 
@@ -772,7 +777,7 @@ user_login(#{user := User, lserver := Host, resource := Resource} = State) ->
 %%    user_logout(JID#jid.luser, JID#jid.lserver, JID#jid.lresource, no_status).
 
 %% cuando un usuario desconecta, buscar en la tabla su JID/USR y quitarlo
-user_logout(User, Host, Resource, _Status) ->
+user_logout(#{user := User, lserver := Host, resource := Resource} = State, _Reason) ->
     TableHost = table_name(Host),
     TableServer = table_name(server),
     ets:update_counter(TableServer, {user_logout, server}, 1),
@@ -796,7 +801,8 @@ user_logout(User, Host, Resource, _Status) ->
 	    update_counter_create(TableServer, {lang, server, Lang}, -1);
 	[] ->
 	    ok
-    end.
+    end,
+    State.
 
 request_iqversion(User, Host, Resource) ->
     From = jid:make(<<"">>, Host, list_to_binary(atom_to_list(?MODULE))),
@@ -807,7 +813,7 @@ request_iqversion(User, Host, Resource) ->
              to = To,
              id = p1_rand:get_string(),
              sub_els = [Query]},
-    HandleResponse = fun(#iq{type = result} = IQr) ->
+    HandleResponse = fun(#iq{type = Type} = IQr) when (Type == result) or (Type == error) ->
 			       spawn(?MODULE, received_response,
 				     [To, From, IQr]);
 			  (R) ->
@@ -823,32 +829,51 @@ received_response(From, _To, El) ->
     catch
     	_:_ -> ok
     end.
-received_response(From, #iq{type = Type, lang = Lang1, sub_els = Elc}) ->
-    User = From#jid.luser,
-    Host = From#jid.lserver,
+
+received_response(From, #iq{type = error, lang = Lang1, sub_els = Elc} = Iq)
+  when [{xmlel,<<"error">>,
+         [{<<"type">>,<<"modify">>}],
+         [{xmlel,<<"not-acceptable">>,
+           [{<<"xmlns">>,<<"urn:ietf:params:xml:ns:xmpp-stanzas">>}],
+           []}]}] == Elc ->
     Resource = From#jid.lresource,
+    {Client_id, OS_id} =
+        case binary:split(Resource, [<<"-">>, <<"_">>], [global]) of
+            [<<"xabber">>, <<"android">>, _] ->
+                {xabber, android};
+            [<<"Xabber">> | _] ->
+                {xabber, unknown};
+            _ ->
+                ?INFO_MSG("statsdx unknown client: ~n~p", [Iq]),
+                {unknown, unknown}
+        end,
+    received_response(From, Client_id, OS_id, Lang1,
+                      "unknown", "unknown", "unknown");
 
-    result = Type,
-    Lang = case Lang1 of
-	       <<"">> -> "unknown";
-	       L -> binary_to_list(L)
-	   end,
-    TableHost = table_name(Host),
-    TableServer = table_name(server),
-    update_counter_create(TableHost, {lang, Host, Lang}, 1),
-    update_counter_create(TableServer, {lang, server, Lang}, 1),
-
+received_response(From, #iq{type = result, lang = Lang1, sub_els = Elc}) ->
     [El] = fxml:remove_cdata(Elc),
     {xmlel, _, Attrs2, _Els2} = El,
     ?NS_VERSION = fxml:get_attr_s(<<"xmlns">>, Attrs2),
-
     Client = get_tag_cdata_subtag(El, <<"name">>),
     Version = get_tag_cdata_subtag(El, <<"version">>),
     OS = get_tag_cdata_subtag(El, <<"os">>),
     {Client_id, OS_id} = identify(Client, OS),
+    received_response(From, Client_id, OS_id, Lang1, Client, Version, OS);
 
+received_response(From, #iq{type = error, lang = Lang1} = Iq) ->
+    ?INFO_MSG("statsdx unknown client: ~n~p", [Iq]),
+    received_response(From, unknown, unknown, Lang1,
+                      "unknown", "unknown", "unknown").
+
+received_response(From, Client_id, OS_id, Lang1, Client, Version, OS) ->
+    User = From#jid.luser,
+    Host = From#jid.lserver,
+    Resource = From#jid.lresource,
     ConnType = get_connection_type(User, Host, Resource),
-
+    Lang = case Lang1 of
+	       <<"">> -> "unknown";
+	       L -> binary_to_list(L)
+	   end,
     TableHost = table_name(Host),
     TableServer = table_name(server),
     ets:update_counter(TableHost, {client, Host, Client_id}, 1),
@@ -857,13 +882,13 @@ received_response(From, #iq{type = Type, lang = Lang1, sub_els = Elc}) ->
     ets:update_counter(TableServer, {os, server, OS_id}, 1),
     ets:update_counter(TableHost, {conntype, Host, ConnType}, 1),
     ets:update_counter(TableServer, {conntype, server, ConnType}, 1),
+    update_counter_create(TableHost, {lang, Host, Lang}, 1),
+    update_counter_create(TableServer, {lang, server, Lang}, 1),
     update_counter_create(TableHost, {client_os, Host, Client_id, OS_id}, 1),
     update_counter_create(TableServer, {client_os, server, Client_id, OS_id}, 1),
     update_counter_create(TableHost, {client_conntype, Host, Client_id, ConnType}, 1),
     update_counter_create(TableServer, {client_conntype, server, Client_id, ConnType}, 1),
-
-    JID = jid:make(User, Host, Resource),
-    ets:insert(TableHost, {{session, JID}, Client_id, OS_id, Lang, ConnType, Client, Version, OS}).
+    ets:insert(TableHost, {{session, From}, Client_id, OS_id, Lang, ConnType, Client, Version, OS}).
 
 get_connection_type(User, Host, Resource) ->
     UserInfo = ejabberd_sm:get_user_info(User, Host, Resource),
@@ -888,40 +913,48 @@ list_elem(Type, id) ->
     Ids;
 list_elem(clients, full) ->
     [
-     {"Pidgin", pidgin},
-     {"pidgin", pidgin},
-     {"gaim", gaim},
-     {"Gajim", gajim},
-     {"Tkabber", tkabber},
-     {"Psi", psi},
-     {"Adium", adium},
-     {"Pandion", pandion},
-     {"Instantbird", instantbird},
-     {"Telepathy Gabble", 'telepathy-gabble'},
-     {"Swift", swift},
-     {"Kopete", kopete},
-     {"Exodus", exodus},
-     {"libgaim", libgaim},
-     {"JBother", jbother},
-     {"iChat", ichat},
-     {"imagent", messages},
-     {"Miranda", miranda},
-     {"Trillian", trillian},
-     {"QIP Infium", qipinfium},
-     {"JAJC", jajc},
-     {"Coccinella", coccinella},
-     {"Gabber", gabber},
-     {"BitlBee", bitlbee},
-     {"jabber.el", jabberel},
-     {"irssi-xmpp", 'irssi-xmpp'},
-     {"mcabber", mcabber},
-     {"poezio", poezio},
-     {"Profanity", profanity},
+     {"adium", adium},
+     {"aqq", aqq},
+     {"atalk", atalk},
+     {"bitlbee", bitlbee},
+     {"blabber.im", blabber_im},
+     {"bruno", bruno},
      {"centerim", centerim},
-     {"Conversations", conversations},
-     {"Monal", monal},
-     {"AQQ", aqq},
-     {"WTW", wtw},
+     {"coccinella", coccinella},
+     {"conversations", conversations},
+     {"exodus", exodus},
+     {"gabber", gabber},
+     {"gaim", gaim},
+     {"gajim", gajim},
+     {"ichat", ichat},
+     {"imagent", messages},
+     {"instantbird", instantbird},
+     {"irssi-xmpp", irssi_xmpp},
+     {"jabber.el", jabber_el},
+     {"jajc", jajc},
+     {"jbother", jbother},
+     {"kopete", kopete},
+     {"libgaim", libgaim},
+     {"mcabber", mcabber},
+     {"miranda", miranda},
+     {"monal", monal},
+     {"pandion", pandion},
+     {"pidgin", pidgin},
+     {"poezio", poezio},
+     {"profanity", profanity},
+     {"psi", psi},
+     {"qip infium", qipinfium},
+     {"spark", spark},
+     {"swift", swift},
+     {"telepathy gabble", telepathy_gabble},
+     {"thunderbird", thunderbird},
+     {"tkabber", tkabber},
+     {"trillian", trillian},
+     {"vacuum-im", vacuum_im},
+     {"wtw", wtw},
+     {"xabber", xabber},
+     {"xmpp messenger", xmpp_messenger},
+     {"xmppjabberclient", xmpp_jabber_client},
      {"yaxim", yaxim},
      {"unknown", unknown}
     ];
@@ -937,19 +970,24 @@ list_elem(conntypes, full) ->
     ];
 list_elem(oss, full) ->
     [
-     {"Linux", linux},
-     {"Win", windows},
-     {"Gentoo", linux},
-     {"Mac", mac},
-     {"BSD", bsd},
-     {"SunOS", linux},
-     {"Debian", linux},
-     {"Ubuntu", linux},
+     {"android", android},
+     {"bsd", bsd},
+     {"debian", linux},
+     {"gentoo", linux},
+     {"kde", linux},
+     {"linux", linux},
+     {"mac", mac},
+     {"mageia", linux},
+     {"opensuse", linux},
+     {"sunos", linux},
+     {"ubuntu", linux},
+     {"win", windows},
      {"unknown", unknown}
     ].
 
 identify(Client, OS) ->
-    Res = {try_match(Client, list_elem(clients, full)), try_match(OS, list_elem(oss, full))},
+    Res = {try_match(string:to_lower(Client), list_elem(clients, full)),
+           try_match(string:to_lower(OS), list_elem(oss, full))},
     case Res of
 	{libgaim, mac} -> {adium, mac};
 	{adium, unknown} -> {adium, mac};
@@ -1025,6 +1063,19 @@ web_menu_node(Acc, _Node, Lang) ->
 
 web_menu_host(Acc, _Host, Lang) ->
     Acc ++ [{<<"statsdx">>, <<(translate:translate(Lang, ?T("Statistics")))/binary, " Dx">>}].
+
+web_user(Acc, User, Host, Lang) ->
+    Filter = [<<"username">>, User],
+    Sort_query = {normal, 1},
+    Acc ++
+        [?XCT(<<"h3">>, <<(translate:translate(Lang, ?T("Statistics")))/binary, " Dx">>),
+	 ?XE(<<"table">>,
+             [?XE(<<"thead">>,
+                  [?XE(<<"tr">>, make_sessions_table_tr(Lang, false) )]),
+              ?XE(<<"tbody">>,
+                  do_sessions_table(global, Lang, Filter, Sort_query, Host))
+             ])
+        ].
 
 %%%==================================
 %%%% Web Admin Page
@@ -1205,12 +1256,14 @@ get_sort_query(Q) ->
     end.
 get_sort_query2(Q) ->
     {value, {_, Binary}} = lists:keysearch(<<"sort">>, 1, Q),
-    Integer = binary_to_integer(Binary),
+    Integer = binary_to_integer(lists:nth(1, binary:split(Binary, <<"/">>))),
     case Integer >= 0 of
 	true -> {ok, {normal, Integer}};
 	false -> {ok, {reverse, abs(Integer)}}
     end.
 make_sessions_table_tr(Lang) ->
+    make_sessions_table_tr(Lang, true).
+make_sessions_table_tr(Lang, Sorting) ->
     Titles = [<<"Jabber ID">>,
 	      <<"Client ID">>,
 	      <<"OS ID">>,
@@ -1223,11 +1276,15 @@ make_sessions_table_tr(Lang) ->
 	lists:mapfoldl(
 	  fun(Title, Num_column) ->
 		  NCS = list_to_binary(integer_to_list(Num_column)),
-		  TD = ?XE(<<"td">>, [?CT(Title),
-				  ?BR,
-				  ?ACT(<<"?sort=", NCS/binary>>, <<"<">>),
-				  ?C(<<" ">>),
-				  ?ACT(<<"?sort=-", NCS/binary>>, <<">">>)]),
+                  SortingEls =
+                      case Sorting of
+                          false -> [];
+                          true -> [?BR,
+                                   ?ACT(<<"?sort=", NCS/binary>>, <<"<">>),
+                                   ?C(<<" ">>),
+                                   ?ACT(<<"?sort=-", NCS/binary>>, <<">">>)]
+                      end,
+		  TD = ?XE(<<"td">>, [?CT(Title)] ++ SortingEls),
 		  {TD, Num_column+1}
 	  end,
 	  1,
@@ -1495,9 +1552,9 @@ web_page_host(_, Host, #request{path=[<<"statsdx">> | Filter], q = Q,
     Res = [?XC(<<"h1">>, <<(translate:translate(Lang, ?T("Statistics")))/binary, " Dx">>),
 	   ?XC(<<"h2">>, list_to_binary("Sessions with: "++io_lib:format("~p", [Filter]))),
 	   ?XAE(<<"table">>, [],
-		[?XE(<<"tbody">>,
-		     do_sessions_table(global, Lang, Filter, Sort_query, Host)
-		    )
+		[
+		 ?XE(<<"thead">>, [?XE(<<"tr">>, make_sessions_table_tr(Lang) )]),
+		 ?XE(<<"tbody">>, do_sessions_table(global, Lang, Filter, Sort_query, Host))
 		])
 	  ],
     {stop, Res};
@@ -1540,7 +1597,9 @@ make_url(StatLink, L) ->
 do_stat_table(global, Lang, Stat, Host) ->
     Os = mod_statsdx:get_statistic(global, [Stat, Host]),
     lists:map(
-      fun({L, N}) ->
+      fun({_L, 0}) when Stat == "client" ->
+              ?C(<<"">>);
+         ({L, N}) ->
 	      do_table_element(Lang, L, Stat, io_lib:format("~p", [N]))
       end,
       lists:reverse(lists:keysort(2, Os))
@@ -1559,12 +1618,23 @@ do_sessions_table(_Node, _Lang, Filter, {Sort_direction, Sort_column}, Host) ->
 		_ -> 3 + length(Filter)
 	      end,
 	      UserURL = lists:duplicate(Level, "../") ++ "server/" ++ Server ++ "/user/" ++ User ++ "/",
+              {UpInt, UserEl} =
+                  case Filter of
+                      [<<"username">>, _] ->
+                          {0, ?XCT(<<"td">>, jid:encode(JID))};
+                      _ ->
+                          {1, ?XE(<<"td">>, [?AC(list_to_binary(UserURL), jid:encode(JID))])}
+                  end,
+	      UpStr = list_to_binary(lists:duplicate(length(Filter) + UpInt, "../")),
+	      ClientIdBin = misc:atom_to_binary(Client_id),
+	      OsIdBin = misc:atom_to_binary(OS_id),
+	      ConnTypeBin = misc:atom_to_binary(ConnType),
 	      ?XE(<<"tr">>, [
-			 ?XE(<<"td">>, [?AC(list_to_binary(UserURL), jid:encode(JID))]),
-			 ?XCTB("td", atom_to_list(Client_id)),
-			 ?XCTB("td", atom_to_list(OS_id)),
-			 ?XCTB("td", LangS),
-			 ?XCTB("td", atom_to_list(ConnType)),
+			 UserEl,
+			 ?XE(<<"td">>, [?AC(<<UpStr/binary, "statsdx/client/", ClientIdBin/binary>>, ClientIdBin)]),
+			 ?XE(<<"td">>, [?AC(<<UpStr/binary, "statsdx/os/", OsIdBin/binary>>, OsIdBin)]),
+			 ?XE(<<"td">>, [?AC(<<UpStr/binary, "statsdx/languages/", Lang/binary>>, Lang)]),
+			 ?XE(<<"td">>, [?AC(<<UpStr/binary, "statsdx/conntype/", ConnTypeBin/binary>>, ConnTypeBin)]),
 			 ?XCTB("td", Client),
 			 ?XCTB("td", Version),
 			 ?XCTB("td", OS)
@@ -1594,6 +1664,7 @@ get_sessions_filtered(Filter, server) ->
       ejabberd_config:get_option(hosts));
 get_sessions_filtered(Filter, Host) ->
     Match = case Filter of
+		[<<"username">>, Username] -> {{session, {jid, Username, Host, '$1', Username, Host, '$1'}}, '$2', '$3', '$4', '$5', '$6', '$7', '$8'};
 		[<<"client">>, Client] -> {{session, '$1'}, misc:binary_to_atom(Client), '$2', '$3', '$4', '$5', '$6', '$7'};
 		[<<"os">>, OS] -> {{session, '$1'}, '$2', misc:binary_to_atom(OS), '$3', '$4', '$5', '$6', '$7'};
 		[<<"conntype">>, ConnType] -> {{session, '$1'}, '$2', '$3', '$4', misc:binary_to_atom(ConnType), '$5', '$6', '$7'};

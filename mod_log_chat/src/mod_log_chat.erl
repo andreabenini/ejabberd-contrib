@@ -10,7 +10,7 @@
 
 -behaviour(gen_mod).
 
--export([start/2, stop/1, depends/2, mod_opt_type/1, mod_options/1]).
+-export([start/2, stop/1, depends/2, mod_opt_type/1, mod_options/1, mod_doc/0]).
 -export([init/1,
 	 log_packet_send/1,
 	 log_packet_receive/1]).
@@ -280,7 +280,7 @@ depends(_Host, _Opts) ->
     [].
 
 mod_opt_type(host_config) -> econf:list(econf:any());
-mod_opt_type(path) -> fun iolist_to_binary/1;
+mod_opt_type(path) -> econf:directory(write);
 mod_opt_type(format) ->
     fun (A) when is_atom(A) -> A end.
 
@@ -288,3 +288,5 @@ mod_options(_Host) ->
     [{host_config, []},
      {path, ?DEFAULT_PATH},
      {format, ?DEFAULT_FORMAT}].
+
+mod_doc() -> #{}.

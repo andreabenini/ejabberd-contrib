@@ -11,7 +11,7 @@
 
 -behaviour(gen_mod).
 
--export([start/2, stop/1, depends/2, mod_options/1, mod_opt_type/1]).
+-export([start/2, stop/1, depends/2, mod_options/1, mod_opt_type/1, mod_doc/0]).
 -export([cron_list/1, cron_del/1,
 	 run_task/3,
 	 web_menu_host/3, web_page_host/3,
@@ -56,6 +56,9 @@ mod_opt_type(tasks) ->
 
 mod_options(_Host) ->
     [{tasks, []}].
+
+mod_doc() ->
+    #{}.
 
 %% ---------------------
 %% Task management
@@ -136,8 +139,9 @@ update_timer_ref(TaskId, NewTimerRef) ->
 
 %% Method to add new task
 add_task(Host, Task) ->
-    [TimeNum, TimeUnit, Mod, Fun, Args, InTimerType] =
-	[proplists:get_value(Key, Task) || Key <- [time, units, module, function, arguments, timer_type]],
+    [TimeNum, TimeUnit, Mod, Fun, ArgsType, Args1, InTimerType] =
+	[proplists:get_value(Key, Task) || Key <- [time, units, module, function,
+                                                   args_type, arguments, timer_type]],
     TimerType = case InTimerType of
                     <<"fixed">> ->
                         fixed;
@@ -149,6 +153,11 @@ add_task(Host, Task) ->
 
     %% Get new task identifier
     TaskId = get_new_taskid(),
+
+    Args = case ArgsType of
+               string -> [binary_to_list(Arg) || Arg <- Args1];
+               _ -> Args1
+           end,
 
     TimerRef = case TimerType of
                    interval ->

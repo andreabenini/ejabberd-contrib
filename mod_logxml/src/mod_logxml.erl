@@ -13,7 +13,7 @@
 
 -export([start/2, init/6, stop/1,
 	 send_packet/1, receive_packet/1,
-	 mod_opt_type/1, mod_options/1, depends/2]).
+	 mod_opt_type/1, mod_options/1, depends/2, mod_doc/0]).
 
 -include_lib("xmpp/include/xmpp.hrl").
 
@@ -70,6 +70,8 @@ init(Host, Logdir, RotateO, CheckRKP, ShowIP, FilterO) ->
 
 depends(_Host, _Opts) ->
     [].
+
+mod_doc() -> #{}.
 
 %% -------------------
 %% Main
@@ -262,7 +264,7 @@ make_dir_rec(Dir) ->
 get_gregorian_day() -> calendar:date_to_gregorian_days(date()).
 
 get_now_iso() ->
-    xmpp_util:encode_timestamp(now()).
+    xmpp_util:encode_timestamp(erlang:timestamp()).
 
 calc_div(A, B) when is_integer(A) and is_integer(B) and (B /= 0) ->
     A/B;

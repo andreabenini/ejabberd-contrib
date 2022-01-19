@@ -13,7 +13,7 @@
 
 -behaviour(gen_mod).
 
--export([start/2, stop/1, depends/2, mod_opt_type/1, mod_options/1]).
+-export([start/2, stop/1, depends/2, mod_opt_type/1, mod_options/1, mod_doc/0]).
 -export([loop/1, get_statistic/2,
 	 pre_uninstall/0,
 	 received_response/3,
@@ -29,7 +29,7 @@
 	 register_user/2, remove_user/2, user_send_packet/1,
          user_send_packet_traffic/1, user_receive_packet_traffic/1,
 	 %%user_logout_sm/3,
-	 request_iqversion/3,
+	 request_iqversion/4,
 	 user_login/1, user_logout/2]).
 
 -include("ejabberd_commands.hrl").
@@ -97,6 +97,8 @@ mod_opt_type(sessionlog) ->
 mod_options(_Host) ->
     [{hooks, false},
      {sessionlog, "/tmp/ejabberd_logsession_@HOST@.log"}].
+
+mod_doc() -> #{}.
 
 %%%==================================
 %%%% Stats Server
@@ -193,7 +195,7 @@ prepare_stats_host(Host, Hooks, CD) ->
 	    ejabberd_hooks:add(register_user, Host, ?MODULE, register_user, 90),
 	    ejabberd_hooks:add(remove_user, Host, ?MODULE, remove_user, 90),
 	    ejabberd_hooks:add(c2s_session_opened, Host, ?MODULE, user_login, 90),
-	    ejabberd_hooks:add(c2s_closed, Host, ?MODULE, user_logout, 90),
+	    ejabberd_hooks:add(c2s_closed, Host, ?MODULE, user_logout, 40),
 	    %%ejabberd_hooks:add(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
 	    ejabberd_hooks:add(user_send_packet, Host, ?MODULE, user_send_packet, 90);
 	traffic ->
@@ -202,7 +204,7 @@ prepare_stats_host(Host, Hooks, CD) ->
 	    ejabberd_hooks:add(register_user, Host, ?MODULE, register_user, 90),
 	    ejabberd_hooks:add(remove_user, Host, ?MODULE, remove_user, 90),
 	    ejabberd_hooks:add(c2s_session_opened, Host, ?MODULE, user_login, 90),
-	    ejabberd_hooks:add(c2s_closed, Host, ?MODULE, user_logout, 90),
+	    ejabberd_hooks:add(c2s_closed, Host, ?MODULE, user_logout, 40),
 	    %%ejabberd_hooks:add(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
 	    ejabberd_hooks:add(user_send_packet, Host, ?MODULE, user_send_packet, 90);
 	false ->
@@ -222,7 +224,7 @@ finish_stats() ->
 
 finish_stats(Host) ->
     ejabberd_hooks:delete(c2s_session_opened, Host, ?MODULE, user_login, 90),
-    ejabberd_hooks:delete(c2s_closed, Host, ?MODULE, user_logout, 90),
+    ejabberd_hooks:delete(c2s_closed, Host, ?MODULE, user_logout, 40),
     %%ejabberd_hooks:delete(sm_remove_connection_hook, Host, ?MODULE, user_logout_sm, 90),
     ejabberd_hooks:delete(user_send_packet, Host, ?MODULE, user_send_packet, 90),
     ejabberd_hooks:delete(user_send_packet, Host, ?MODULE, user_send_packet_traffic, 92),
@@ -765,11 +767,11 @@ ms_to_time(T) ->
 
 
 %% Cuando un usuario conecta, pedirle iq:version a nombre de Host/mod_stats2file
-user_login(#{user := User, lserver := Host, resource := Resource} = State) ->
+user_login(#{user := User, lserver := Host, resource := Resource, ip := IpPort} = State) ->
     ets:update_counter(table_name(server), {user_login, server}, 1),
     ets:update_counter(table_name(Host), {user_login, Host}, 1),
     timer:apply_after(timer:seconds(5), ?MODULE,
-                      request_iqversion, [User, Host, Resource]),
+                      request_iqversion, [User, Host, Resource, IpPort]),
     State.
 
 
@@ -804,6 +806,11 @@ user_logout(#{user := User, lserver := Host, resource := Resource} = State, _Rea
     end,
     State.
 
+request_iqversion(User, Host, Resource, IpPort) ->
+    case ejabberd_sm:get_user_ip(User, Host, Resource) of
+        IpPort -> request_iqversion(User, Host, Resource);
+        _ -> ok
+    end.
 request_iqversion(User, Host, Resource) ->
     From = jid:make(<<"">>, Host, list_to_binary(atom_to_list(?MODULE))),
     To = jid:make(User, Host, Resource),

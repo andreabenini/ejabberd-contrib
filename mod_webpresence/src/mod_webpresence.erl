@@ -26,6 +26,7 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3,
+         mod_status/0,
 	 mod_opt_type/1, mod_options/1, depends/2, mod_doc/0]).
 
 %% API
@@ -44,7 +45,6 @@
 %% Copied from ejabberd_sm.erl
 -record(session, {sid, usr, us, priority, info}).
 
--define(PIXMAPS_DIR, <<"pixmaps">>).
 -define(AUTO_ACL, webpresence_auto).
 
 %%====================================================================
@@ -54,7 +54,13 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 start(Host, Opts) ->
-    Dir = gen_mod:get_opt(pixmaps_path, Opts),
+    Dir = case gen_mod:get_opt(pixmaps_path, Opts) of
+              auto ->
+                  Package = atom_to_list(?MODULE),
+                  filename:join([ext_mod:modules_dir(), Package, "priv", "pixmaps"]);
+              PP ->
+                  PP
+          end,
     catch ets:new(pixmaps_dirs, [named_table, public]),
     ets:insert(pixmaps_dirs, {directory, Dir}),
     case gen_mod:start_child(?MODULE, Host, Opts) of
@@ -77,7 +83,7 @@ mod_opt_type(host) ->
 mod_opt_type(access) ->
     econf:acl();
 mod_opt_type(pixmaps_path) ->
-    econf:directory();
+    econf:either(auto, econf:directory());
 mod_opt_type(port) ->
     econf:pos_int();
 mod_opt_type(path) ->
@@ -89,7 +95,7 @@ mod_opt_type(baseurl) ->
 mod_options(Host) ->
     [{host, <<"webpresence.", Host/binary>>},
      {access, local},
-     {pixmaps_path, ?PIXMAPS_DIR},
+     {pixmaps_path, auto},
      {port, 5280},
      {path, <<"presence">>},
      {baseurl, iolist_to_binary(io_lib:format(<<"http://~s:5280/presence/">>, [Host]))}].
@@ -99,6 +105,39 @@ depends(_Host, _Opts) ->
     [].
 
 mod_doc() -> #{}.
+
+mod_status() ->
+    Host = ejabberd_config:get_myname(),
+    Url = case find_handler_port_path(any, ?MODULE) of
+        [] -> undefined;
+        [{ThisTls, Port, Path} | _] ->
+            Protocol = case ThisTls of
+                           false -> <<"http">>;
+                           true -> <<"https">>
+                       end,
+            <<Protocol/binary,
+              "://",
+              Host/binary,
+              ":",
+              (integer_to_binary(Port))/binary,
+              "/",
+              (str:join(Path, <<"/">>))/binary,
+              "/">>
+    end,
+    io_lib:format("Serving Webpresence in: ~s", [binary_to_list(Url)]).
+
+find_handler_port_path(Tls, Module) ->
+    lists:filtermap(
+      fun({{Port, _, _},
+           ejabberd_http,
+           #{tls := ThisTls, request_handlers := Handlers}})
+            when (Tls == any) or (Tls == ThisTls) ->
+              case lists:keyfind(Module, 2, Handlers) of
+                  false -> false;
+                  {Path, Module} -> {true, {ThisTls, Port, Path}}
+              end;
+         (_) -> false
+      end, ets:tab2list(ejabberd_listener)).
 
 %%====================================================================
 %% gen_server callbacks

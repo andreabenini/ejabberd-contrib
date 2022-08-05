@@ -29,9 +29,9 @@
 
 -behaviour(gen_mod).
 
--export([start/2, stop/1, depends/2, mod_options/1, mod_opt_type/1, mod_doc/0]).
+-export([start/2, stop/1, depends/2, mod_options/1, mod_opt_type/1, mod_doc/0, mod_status/0]).
 -export([loop/3,
-	 reopen_log/1,
+	 reopen_log/0,
 	 failed_auth/3,
 	 forbidden/1]).
 
@@ -49,9 +49,13 @@ start(Host, Opts) ->
     ejabberd_hooks:add(forbidden_session_hook, Host, ?MODULE, forbidden, 50),
     ejabberd_hooks:add(c2s_auth_result, Host, ?MODULE, failed_auth, 50),
     ejabberd_commands:register_commands(commands()),
-    Filename1 = gen_mod:get_opt(
-		  sessionlog, 
-		  Opts),
+    Filename1 = case gen_mod:get_opt(sessionlog, Opts) of
+                    auto ->
+                        filename:join(filename:dirname(ejabberd_logger:get_log_path()),
+                                      "session_@HOST@.log");
+                    SL ->
+                        SL
+                end,
     Filename = replace_host(Host, Filename1),
     File = open_file(Filename),
     register(get_process_name(Host), spawn(?MODULE, loop, [Filename, File, Host])),
@@ -60,6 +64,7 @@ start(Host, Opts) ->
 stop(Host) ->
     ejabberd_hooks:delete(reopen_log_hook, Host, ?MODULE, reopen_log, 50),
     ejabberd_hooks:delete(forbidden_session_hook, Host, ?MODULE, forbidden, 50),
+    ejabberd_hooks:delete(c2s_auth_result, Host, ?MODULE, failed_auth, 50),
     ejabberd_commands:unregister_commands(commands()),
     Proc = get_process_name(Host),
     exit(whereis(Proc), stop),
@@ -69,19 +74,32 @@ depends(_Host, _Opts) ->
     [].
 
 mod_opt_type(sessionlog) ->
-    econf:string().
+    econf:either(auto, econf:string()).
 
 mod_options(_Host) ->
-    [{sessionlog, "/tmp/ejabberd_logsession_@HOST@.log"}].
+    [{sessionlog, auto}].
 
 mod_doc() -> #{}.
+
+mod_status() ->
+    Host = ejabberd_config:get_myname(),
+    Pid = get_process_name(Host),
+    Pid ! {get_filename, self()},
+    Filename = receive
+	       {filename, F} ->
+		   F
+	   end,
+    io_lib:format("Logging ~p to: ~s", [binary_to_list(Host), Filename]).
 
 %%%----------------------------------------------------------------------
 %%% REQUEST HANDLERS
 %%%----------------------------------------------------------------------
 
-reopen_log(Host) ->
-    get_process_name(Host) ! reopenlog.
+reopen_log() ->
+    lists:foreach(
+      fun(Host) ->
+              gen_server:cast(get_process_name(Host), reopenlog)
+      end, ejabberd_option:hosts()).
 
 forbidden(JID) ->
     Host = JID#jid.lserver,
@@ -95,9 +113,9 @@ failed_auth(#{lserver := Host, ip := IPPT} = State, {false, Reason}, U) ->
 
 commands() ->
     [#ejabberd_commands{name = reopen_seslog, tags = [logs, server],
-			desc = "Reopen mod_logsession log file",
+			desc = "Reopen mod_logsession log files",
 			module = ?MODULE, function = reopen_log,
-			args = [{host, string}],
+			args = [],
 			result = {res, rescode}}].
 
 %%%----------------------------------------------------------------------
@@ -112,6 +130,9 @@ loop(Filename, File, Host) ->
 	reopenlog ->
 	    File2 = reopen_file(File, Filename),
 	    loop(Filename, File2, Host);
+        {get_filename, Pid} ->
+	    Pid ! {filename, Filename},
+	    loop(Filename, File, Host);
 	stop ->
 	    close_file(File)
     end.

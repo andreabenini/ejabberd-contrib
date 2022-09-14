@@ -467,16 +467,16 @@ send_message_registered(WP, To, Host, BaseURL, Lang) ->
     {User, Server} = WP#webpresence.us,
     JIDS = jid:encode({User, Server, <<"">>}),
     Oavatar = case WP#webpresence.avatar of
-		  false -> <<"">>;
+		  %%false -> <<"">>;
 		  true -> <<"  avatar\n"
 			    "  avatar/my.png\n">>
 	      end,
     Ojs = case WP#webpresence.js of
-	      false -> <<"">>;
+	      %%false -> <<"">>;
 	      true -> <<"  js\n">>
 	  end,
     Otext = case WP#webpresence.text of
-		false -> <<"">>;
+		%%false -> <<"">>;
 		true -> ?BC([
                         <<"  text\n"
 			  "  text/res/<">>, translate:translate(Lang, ?T("Resource")), <<">\n">>
@@ -495,7 +495,7 @@ send_message_registered(WP, To, Host, BaseURL, Lang) ->
                                       ])
 	     end,
     Oxml = case WP#webpresence.xml of
-	       false -> <<"">>;
+	       %%false -> <<"">>;
 	       true -> <<"  xml\n">>
 	   end,
     Allowed_type = case {Oimage, Oxml, Oavatar, Otext, Ojs} of
@@ -506,21 +506,21 @@ send_message_registered(WP, To, Host, BaseURL, Lang) ->
 		       {_, _, _, _, _} -> <<"image">>
 		   end,
     {USERID_jid, Example_jid} = case WP#webpresence.jidurl of
-				    false -> {<<"">>, <<"">>};
+				    %%false -> {<<"">>, <<"">>};
 				    true ->
 					JIDT = ?BC([<<"jid/">>, User, <<"/">>, Server]),
 					{?BC([<<"  ">>, JIDT, <<"\n">>]),
 					 ?BC([<<"  ">>, BaseURL, JIDT, <<"/">>, Allowed_type, <<"/\n">>])}
 				end,
     {USERID_rid, Example_rid, Text_rid} = case WP#webpresence.ridurl of
-					      false -> {<<"">>, <<"">>, <<"">>};
-					      RID when is_binary(RID) ->
-						  RIDT = ?BC([<<"rid/">>, RID]),
-						  {?BC([<<"  ">>, RIDT, <<"\n">>]),
-						   ?BC([<<"  ">>, BaseURL, RIDT, <<"/">>, Allowed_type, <<"/\n">>]),
-						   ?BC([translate:translate(Lang, ?T("If you forget your RandomID, register again to receive this message.")), <<"\n">>,
-						   translate:translate(Lang, ?T("To get a new RandomID, disable the option and register again.")), <<"\n">>])
-						  }
+					      false -> {<<"">>, <<"">>, <<"">>}%;
+					      %%RID when is_binary(RID) ->
+						%%  RIDT = ?BC([<<"rid/">>, RID]),
+						%%  {?BC([<<"  ">>, RIDT, <<"\n">>]),
+						%%   ?BC([<<"  ">>, BaseURL, RIDT, <<"/">>, Allowed_type, <<"/\n">>]),
+						%%   ?BC([translate:translate(Lang, ?T("If you forget your RandomID, register again to receive this message.")), <<"\n">>,
+						%%   translate:translate(Lang, ?T("To get a new RandomID, disable the option and register again.")), <<"\n">>])
+						%%  }
 					  end,
     Subject = ?BC([translate:translate(Lang, ?T("Web Presence")), <<": ">>, translate:translate(Lang, ?T("registered"))]),
     Body = ?BC([translate:translate(Lang, ?T("You have registered:")), <<" ">>, JIDS, <<"\n\n">>,
@@ -572,7 +572,7 @@ try_auto_webpresence(LUser, LServer) ->
 	    #webpresence{};
 	allow ->
 	    #webpresence{us = {LUser, LServer},
-			 ridurl = false,
+			 ridurl = true,
 			 jidurl = true,
 			 xml = true,
 			 avatar = true,
@@ -757,23 +757,7 @@ available_themes(list) ->
 	    [T || T <- L2, hd(T) =/= 46];
         {error, _} ->
             []
-    end;
-
-available_themes(xdata) ->
-    lists:map(
-      fun(Theme) ->
-              #xmlel{
-                 name = <<"option">>,
-                 attrs = [{<<"label">>, iolist_to_binary(Theme)}],
-                 children = [
-                             #xmlel{
-                                name = <<"value">>,
-                                attrs = [],
-                                children = [{xmlcdata, iolist_to_binary(Theme)}]
-                               }
-                            ]
-                }
-      end, available_themes(list)).
+    end.
 
 show_presence({image_no_check, Theme, Pr}) ->
     Dir = get_pixmaps_directory(),
@@ -1103,17 +1087,17 @@ do_stat_table_with(Values, Total) ->
 do_table_element(L, [N], Perc) ->
     ?XE(<<"tr">>,
 	[?XE(<<"td">>, [L]),
-	 ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}], [N]),
+	 ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}], ?BC(N)),
 	 ?XE(<<"td">>,
 	     [?XAE(<<"div">>,
 		   [{<<"class">>, <<"graph">>}],
 		   [?XAC(<<"div">>,
-			 [{<<"class">>, <<"bar">>}, {<<"style">>, ?BC([<<"width: ">>, Perc, <<"%;">>])}],
-			 []
+			 [{<<"class">>, <<"bar">>}, {<<"style">>, ?BC(["width: ", Perc, "%;"])}],
+			 <<>>
 			)]
 		  )]
 	    ),
-	 ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}], [?BC([Perc, <<"%">>])])
+	 ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}], ?BC([Perc, "%"]))
 	]).
 
 css_table()->

@@ -126,7 +126,7 @@ try_register(LUser, LServer, Password) ->
                         false -> Password
                     end,
     case make_req(post, <<"register">>, LUser, LServer, PasswordFinal) of
-        {ok, created} -> {cache, {ok, Password}};
+        {ok, <<"created">>} -> {cache, {ok, Password}};
         {error, conflict} -> {nocache, {error, exists}};
         _Error -> {nocache, {error, not_allowed}}
     end.
@@ -180,6 +180,15 @@ remove_user_req(LUser, LServer, Password, Method) ->
 %%% Request maker
 %%%----------------------------------------------------------------------
 
+-ifdef(OTP_BELOW_25).
+-dialyzer({no_missing_calls, [uri_quote/1]}).
+uri_quote(URL) ->
+    http_uri:encode(URL).
+-else.
+uri_quote(URL) ->
+    uri_string:quote(URL). % Available since OTP 25.0
+-endif.
+
 -spec make_req(post | get, binary(), binary(), binary(), binary()) ->
     {ok, Body :: binary()} | {error, term()}.
 make_req(_, _, LUser, LServer, _) when LUser == error orelse LServer == error ->
@@ -195,9 +204,9 @@ make_req(Method, Path, LUser, LServer, Password) ->
                      false -> <<"/">>
                  end,
     BasicAuth64 = base64:encode(BasicAuth),
-    LUserE = list_to_binary(misc:uri_parse(binary_to_list(LUser))),
-    LServerE = list_to_binary(misc:uri_parse(binary_to_list(LServer))),
-    PasswordE = list_to_binary(misc:uri_parse(binary_to_list(Password))),
+    LUserE = list_to_binary(uri_quote(binary_to_list(LUser))),
+    LServerE = list_to_binary(uri_quote(binary_to_list(LServer))),
+    PasswordE = list_to_binary(uri_quote(binary_to_list(Password))),
     Query = <<"user=", LUserE/binary, "&server=", LServerE/binary, "&pass=", PasswordE/binary>>,
     Header = [{<<"Authorization">>, <<"Basic ", BasicAuth64/binary>>}],
     ContentType = {<<"Content-Type">>, <<"application/x-www-form-urlencoded">>},
@@ -220,7 +229,7 @@ make_req(Method, Path, LUser, LServer, Password) ->
         <<"400">> -> {error, RespBody};
 	<<"503">> -> {error, RespBody};
         <<"204">> -> {ok, <<"">>};
-        <<"201">> -> {ok, created};
+        <<"201">> -> {ok, <<"created">>};
         <<"200">> -> {ok, RespBody};
         _ -> {error, RespBody}
     end.

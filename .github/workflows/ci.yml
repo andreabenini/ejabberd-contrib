@@ -21,10 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        otp: ['21.3', '25.3', '26']
-    runs-on: ubuntu-22.04
-    container:
-      image: erlang:${{ matrix.otp }}
+        otp: [25, 26, 27]
+        elixir: ['1.17']
+    runs-on: ubuntu-20.04
 
     steps:
 
@@ -33,23 +32,22 @@ jobs:
       with:
         repository: processone/ejabberd
 
+    - name: Get specific Erlang/OTP
+      uses: erlef/setup-beam@v1
+      with:
+        otp-version: ${{matrix.otp}}
+        elixir-version: ${{matrix.elixir}}
+
     - name: Checkout ejabberd-contrib
       uses: actions/checkout@v4
       with:
         path: .ejabberd-modules/sources/ejabberd-contrib
 
-    - name: Get a compatible Rebar3
-      if: matrix.otp <= '21.3'
-      run: |
-        rm rebar3
-        wget https://github.com/processone/ejabberd/raw/21.12/rebar3
-        chmod +x rebar3
-
     - name: Prepare libraries
       run: |
-        apt-get -qq update
-        apt-get -y purge libgd3 nginx
-        apt-get -qq install libexpat1-dev libgd-dev libpam0g-dev \
+        sudo apt-get -qq update
+        sudo apt-get -y purge libgd3 nginx
+        sudo apt-get -qq install libexpat1-dev libgd-dev libpam0g-dev \
                                  libsqlite3-dev libwebp-dev libyaml-dev
 
     - name: Prepare rebar
@@ -70,6 +68,8 @@ jobs:
       with:
         path: |
           ~/.cache/rebar3/
+          ~/.hex/
+          ~/.mix/
         key: ${{matrix.otp}}-${{hashFiles('rebar.config')}}
 
     - name: Compile
@@ -78,10 +78,8 @@ jobs:
         ./configure --with-rebar=./rebar3 \
                     --prefix=/tmp/ejabberd \
                     --enable-all \
-                    --disable-elixir \
                     --disable-mssql \
                     --disable-odbc
-        make update
         make
 
     - name: Start ejabberd
@@ -105,7 +103,7 @@ jobs:
       run: sed -i '/mod_captcha_rust/d' modules_available.txt
 
     - name: Disable mod_s3_upload testing with old OTP
-      if: matrix.otp < '25'
+      if: matrix.otp < 25
       run: sed -i '/mod_s3_upload/d' modules_available.txt
 
     - name: Install modules
@@ -138,11 +136,16 @@ jobs:
 
     - name: Setup dependencies
       run: |
-        sed -i 's|{deps, \[|{deps, \[fusco, observer_cli, recon, \
-                  {cuesport, ".*", {git, "https://github.com/goj/cuesport"}}, \
+        sed -i 's|{deps, \[|{deps, \[ \
+                  {cuesport, ".*", {git, "https://github.com/goj/cuesport", {branch, "master"}}}, \
                   {ecaptcha, ".*", {git, "https://github.com/seriyps/ecaptcha", {branch, "master"}}}, \
+                  {fusco, "0.1.1", {git, "https://github.com/esl/fusco", {branch, "master"}}}, \
+                  {observer_cli, ".*", {git, "https://github.com/zhongwencool/observer_cli", {branch, "master"}}}, \
+                  {prometheus, "1.44.0", {git, "https://github.com/deadtrickster/prometheus.erl", {branch, "master"}}}, \
+                  {quantile_estimator, "0.2.1", {git, "https://github.com/deadtrickster/quantile_estimator", {branch, "master"}}}, \
+                  {recon, "2.5.5", {git, "https://github.com/ferd/recon", {branch, "master"}}}, \
                  |g' rebar.config
-        sed -i 's|stdlib, |stdlib, fusco, observer_cli, recon, cuesport, ecaptcha, |g' rebar.config
+        sed -i 's|stdlib, |stdlib, cuesport, ecaptcha, fusco, observer_cli, prometheus, recon, |g' rebar.config
 
     - run: make
     - run: make hooks
@@ -154,7 +157,7 @@ jobs:
       run: |
         rm -rf _build/default/lib/ejabberd/ebin/fusco*
         rm -rf _build/default/lib/ejabberd/ebin/observer_cli*
-        make dialyzer # Too many errors... first fix them, then enable this
+        make dialyzer
 
     - name: View logs dir
       if: always()

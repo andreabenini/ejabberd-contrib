@@ -38,8 +38,9 @@
 -export([in_auth_result/3, out_auth_result/2, get_info/5]).
 
 -define(NS_URN_SERVERINFO, <<"urn:xmpp:serverinfo:0">>).
+-define(PUBLIC_HOSTS_URL, <<"https://data.xmpp.net/providers/v2/providers-Ds.json">>).
 
--record(state, {host, pubsub_host, node, monitors = #{}, timer = undefined}).
+-record(state, {host, pubsub_host, node, monitors = #{}, timer = undefined, public_hosts = []}).
 
 start(Host, Opts) ->
     xmpp:register_codec(pubsub_serverinfo_codec),
@@ -58,27 +59,78 @@ stop(Host) ->
 
 init([Host, _Opts]) ->
     TRef = timer:send_interval(timer:minutes(5), self(), update_pubsub),
-    State = #state{host = Host, pubsub_host = <<"pubsub.", Host/binary>>, node = <<"serverinfo">>, timer = TRef},
+    Monitors = init_monitors(Host),
+    PublicHosts = fetch_public_hosts(),
+    PubsubHost = gen_mod:get_module_opt(Host, mod_pubsub, host),
+    State = #state{host = Host,
+                   pubsub_host = PubsubHost,
+                   node = <<"serverinfo">>,
+                   timer = TRef,
+                   monitors = Monitors,
+                   public_hosts = PublicHosts},
     self() ! update_pubsub,
     {ok, State}.
 
+-spec init_monitors(binary()) -> map().
+init_monitors(Host) ->
+    lists:foldl(
+      fun(Domain, Monitors) ->
+              RefIn = make_ref(), % just dummies
+              RefOut = make_ref(),
+              maps:merge(#{RefIn => {incoming, {Host, Domain, true}},
+                           RefOut => {outgoing, {Host, Domain, true}}},
+                         Monitors)
+      end,
+      #{},
+      ejabberd_option:hosts() -- [Host]).
+
+-spec fetch_public_hosts() -> list().
+fetch_public_hosts() ->
+    try
+        {ok, {{_, 200, _}, _Headers, Body}} = httpc:request(?PUBLIC_HOSTS_URL),
+        case misc:json_decode(Body) of
+            PublicHosts when is_list(PublicHosts) -> PublicHosts;
+            Other ->
+                ?WARNING_MSG("Parsed JSON for public hosts was not a list: ~p", [Other]),
+                []
+        end
+    catch E:R ->
+            ?WARNING_MSG("Failed fetching public hosts (~p): ~p", [E, R]),
+            []
+    end.
+
+handle_cast({Event, Domain, Pid}, #state{host = Host, monitors = Mons} = State)
+  when Event == register_in; Event == register_out ->
+    Ref = monitor(process, Pid),
+    IsPublic = check_if_public(Domain, State),
+    NewMons = maps:put(Ref, {event_to_dir(Event), {Host, Domain, IsPublic}}, Mons),
+    {noreply, State#state{monitors = NewMons}};
 handle_cast(_, State) ->
     {noreply, State}.
+
+event_to_dir(register_in) -> incoming;
+event_to_dir(register_out) -> outgoing.
 
 handle_call(_Request, _From, State) ->
     {noreply, State}.
 
-handle_info({iq_reply, IQReply, {LServer, RServer, Dir, Pid}},
-	    #state{monitors = Mon} = State) ->
+handle_info({iq_reply, IQReply, {LServer, RServer}},
+	    #state{monitors = Mons} = State) ->
     case IQReply of
 	#iq{type = result, sub_els = [El]} ->
 	    case xmpp:decode(El) of
 		#disco_info{features = Features} ->
 		    case lists:member(?NS_URN_SERVERINFO, Features) of
 			true ->
-			    Ref = monitor(process, Pid),
-			    Mon2 = maps:put(Ref, {Dir, {LServer, RServer}}, Mon),
-			    {noreply, State#state{monitors = Mon2}};
+			    NewMons = maps:fold(fun(Ref, {Dir, {LServer0, RServer0, _}}, Acc)
+                                    when LServer == LServer0, RServer == RServer0 ->
+                                      maps:put(Ref, {Dir, {LServer, RServer, true}}, Acc);
+                                 (Ref, Other, Acc) ->
+                                      maps:put(Ref, Other, Acc)
+                              end,
+                              #{},
+                              Mons),
+			    {noreply, State#state{monitors = NewMons}};
 			_ ->
 			    {noreply, State}
 		    end;
@@ -123,47 +175,67 @@ mod_options(_Host) ->
 
 mod_doc() -> #{}.
 
-in_auth_result(#{server_host := Host, server := LServer, remote_server := RServer} = State, true, _Server) ->
-    check_if_remote_has_support(Host, LServer, RServer, incoming),
+in_auth_result(#{server_host := Host, remote_server := RServer} = State, true, _Server) ->
+    gen_server:cast(gen_mod:get_module_proc(Host, ?MODULE), {register_in, RServer, self()}),
     State;
 in_auth_result(State, _, _) ->
     State.
 
-out_auth_result(#{server_host := Host, server := LServer, remote_server := RServer} = State, true) ->
-    check_if_remote_has_support(Host, LServer, RServer, outgoing),
+out_auth_result(#{server_host := Host, remote_server := RServer} = State, true) ->
+    gen_server:cast(gen_mod:get_module_proc(Host, ?MODULE), {register_out, RServer, self()}),
     State;
 out_auth_result(State, _) ->
     State.
 
-check_if_remote_has_support(Host, LServer, RServer, Dir) ->
+check_if_public(Domain, State) ->
+    maybe_send_disco_info(is_public(Domain, State) orelse is_monitored(Domain, State), Domain, State).
+
+is_public(Domain, #state{public_hosts = PublicHosts}) ->
+    lists:member(Domain, PublicHosts).
+
+is_monitored(Domain, #state{host = Host, monitors = Mons}) ->
+    maps:size(
+      maps:filter(
+        fun(_Ref, {_Dir, {LServer, RServer, IsPublic}})
+              when LServer == Host, RServer == Domain -> IsPublic;
+           (_Ref, _Other) -> false
+        end,
+        Mons)) =/= 0.
+
+maybe_send_disco_info(true, _Domain, _State) -> true;
+maybe_send_disco_info(false, Domain, #state{host = Host}) ->
     Proc = gen_mod:get_module_proc(Host, ?MODULE),
-    IQ = #iq{type = get, from = jid:make(LServer),
-	     to = jid:make(RServer), sub_els = [#disco_info{}]},
-    ejabberd_router:route_iq(IQ, {LServer, RServer, Dir, self()}, Proc).
+    IQ = #iq{type = get, from = jid:make(Host),
+	     to = jid:make(Domain), sub_els = [#disco_info{}]},
+    ejabberd_router:route_iq(IQ, {Host, Domain}, Proc),
+    false.
 
 update_pubsub(#state{host = Host, pubsub_host = PubsubHost, node = Node, monitors = Mons}) ->
     Map = maps:fold(
-	fun(_, {Dir, {MyDomain, Target}}, Acc) ->
-	    maps:update_with(MyDomain,
-		fun(Acc2) ->
-		    maps:update_with(Target,
-			fun(Types) -> Types#{Dir => true} end,
-			#{Dir => true}, Acc2)
-		end, #{Target => #{Dir => true}}, Acc)
-	end, #{}, Mons),
+            fun(_, {Dir, {MyDomain, Target, IsPublic}}, Acc) ->
+                    maps:update_with(MyDomain,
+                                     fun(Acc2) ->
+                                             maps:update_with(Target,
+                                                              fun({Types, _}) -> {Types#{Dir => true}, IsPublic} end,
+                                                              {#{Dir => true}, IsPublic}, Acc2)
+                                     end, #{Target => {#{Dir => true}, IsPublic}}, Acc)
+            end, #{}, Mons),
     Domains = maps:fold(
-	fun(MyDomain, Targets, Acc) ->
-	    Remote = maps:fold(
-		fun(Remote, Types, Acc2) ->
-		    [#pubsub_serverinfo_remote_domain{name = Remote, type = maps:keys(Types)} | Acc2]
-		end, [], Targets),
-	    [#pubsub_serverinfo_domain{name = MyDomain, remote_domain = Remote} | Acc]
-	end, [], Map),
+                fun(MyDomain, Targets, Acc) ->
+                        Remote = maps:fold(
+                                   fun(Remote, {Types, true}, Acc2) ->
+                                           [#pubsub_serverinfo_remote_domain{name = Remote, type = maps:keys(Types)} | Acc2];
+                                      (_HiddenRemote, {Types, false}, Acc2) ->
+                                           [#pubsub_serverinfo_remote_domain{type = maps:keys(Types)} | Acc2]
+                                   end, [], Targets),
+                        [#pubsub_serverinfo_domain{name = MyDomain, remote_domain = Remote} | Acc]
+                end, [], Map),
 
     PubOpts = [{persist_items, true}, {max_items, 1}, {access_model, open}],
+    ?DEBUG("Publishing serverinfo pubsub item on ~s: ~p", [PubsubHost, Domains]),
     mod_pubsub:publish_item(
-	PubsubHost, Host, Node, jid:make(Host),
-	<<"current">>, [xmpp:encode(#pubsub_serverinfo{domain = Domains})], PubOpts, all).
+      PubsubHost, Host, Node, jid:make(Host),
+      <<"current">>, [xmpp:encode(#pubsub_serverinfo{domain = Domains})], PubOpts, all).
 
 get_local_features({error, _} = Acc, _From, _To, _Node, _Lang) ->
     Acc;
@@ -179,19 +251,21 @@ get_local_features(Acc, _From, _To, _Node, _Lang) ->
 get_info(Acc, Host, Mod, Node, Lang) when (Mod == undefined orelse Mod == mod_disco), Node == <<"">> ->
     case mod_disco:get_info(Acc, Host, Mod, Node, Lang) of
 	[#xdata{fields = Fields} = XD | Rest] ->
+	    PubsubHost = gen_mod:get_module_opt(Host, mod_pubsub, host),
 	    NodeField = #xdata_field{var = <<"serverinfo-pubsub-node">>,
-		values = [<<"xmpp:pubsub.", Host/binary, "?;node=serverinfo">>]},
+	                             values = [<<"xmpp:", PubsubHost/binary, "?;node=serverinfo">>]},
 	    {stop, [XD#xdata{fields = Fields ++ [NodeField]} | Rest]};
 	_ ->
 	    Acc
     end;
 get_info(Acc, Host, Mod, Node, _Lang) when Node == <<"">>, is_atom(Mod) ->
+    PubsubHost = gen_mod:get_module_opt(Host, mod_pubsub, host),
     [#xdata{type = result,
 	fields = [
 	    #xdata_field{type = hidden,
 		var = <<"FORM_TYPE">>,
 		values = [?NS_SERVERINFO]},
 	    #xdata_field{var = <<"serverinfo-pubsub-node">>,
-		values = [<<"xmpp:pubsub.", Host/binary, "?;node=serverinfo">>]}]} | Acc];
+                         values = [<<"xmpp:", PubsubHost/binary, "?;node=serverinfo">>]}]} | Acc];
 get_info(Acc, _Host, _Mod, _Node, _Lang) ->
     Acc.

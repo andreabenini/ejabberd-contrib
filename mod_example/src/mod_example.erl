@@ -75,25 +75,56 @@
 %%
 %% webadmin
 
+-export([webadmin_menu_main/2, webadmin_page_main/2, webadmin_menu_host/3,
+         webadmin_page_host/3, webadmin_menu_node/3, webadmin_page_node/3,
+         webadmin_menu_hostnode/4, webadmin_page_hostnode/4, webadmin_menu_hostuser/4,
+         webadmin_page_hostuser/4]).
+
+-import(ejabberd_web_admin, [make_command/4, make_command_raw_value/3, make_table/4]).
+
+-include("ejabberd_http.hrl").
+-include("ejabberd_web_admin.hrl").
+
 %%%==================================
 %%%% gen_mod
 
 start(Host, _Opts) ->
-    register_commands(),
-    register_hooks(),
+    register_commands(Host),
     register_hooks(Host),
-    register_hooks_fold(),
-    register_hooks_fold(Host),
-    register_hooks_commands(),
+    register_hooks_commands(Host),
     %register_iq_handlers(Host),
-    ok.
+    {ok,
+     [
+      %% global
+      {hook, example_hook_global, example_hook_global_function1, 81, global},
+      {hook, example_hook_global, example_hook_global_function2, 82, global},
+      {hook, example_hook_global, example_hook_global_function3, 83, global},
+      %% host
+      {hook, example_hook_host, example_hook_host_function1, 81},
+      {hook, example_hook_host, example_hook_host_function2, 82},
+      {hook, example_hook_host, example_hook_host_function3, 83},
+      %% global fold
+      {hook, example_hook_fold_global, example_hook_fold_global_function1, 81, global},
+      {hook, example_hook_fold_global, example_hook_fold_global_function2, 82, global},
+      {hook, example_hook_fold_global, example_hook_fold_global_function3, 83, global},
+      %% host fold
+      {hook, example_hook_fold_host, example_hook_fold_host_function1, 81},
+      {hook, example_hook_fold_host, example_hook_fold_host_function2, 82},
+      {hook, example_hook_fold_host, example_hook_fold_host_function3, 83},
+      %% webadmin
+      {hook, webadmin_menu_main, webadmin_menu_main, 50, global},
+      {hook, webadmin_page_main, webadmin_page_main, 50, global},
+      {hook, webadmin_menu_host, webadmin_menu_host, 50},
+      {hook, webadmin_page_host, webadmin_page_host, 50},
+      {hook, webadmin_menu_node, webadmin_menu_node, 50, global},
+      {hook, webadmin_page_node, webadmin_page_node, 50, global},
+      {hook, webadmin_menu_hostnode, webadmin_menu_hostnode, 50},
+      {hook, webadmin_page_hostnode, webadmin_page_hostnode, 50},
+      {hook, webadmin_menu_hostuser, webadmin_menu_hostuser, 50},
+      {hook, webadmin_page_hostuser, webadmin_page_hostuser, 50}]}.
 
 stop(Host) ->
     unregister_commands(Host),
-    unregister_hooks(),
-    unregister_hooks(Host),
-    unregister_hooks_fold(),
-    unregister_hooks_fold(Host),
     unregister_hooks_commands(Host),
     %unregister_iq_handlers(Host),
     ok.
@@ -129,8 +160,13 @@ mod_doc() ->
 %%%==================================
 %%%% commands: define
 
-register_commands() ->
-    ejabberd_commands:register_commands(?MODULE, get_commands_spec()).
+register_commands(Host) ->
+    case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
+        false ->
+            ejabberd_commands:register_commands(?MODULE, get_commands_spec());
+        true ->
+            ok
+    end.
 
 unregister_commands(Host) ->
     case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
@@ -252,8 +288,8 @@ get_commands_spec() ->
                         function = atom,
                         args = [{arg_string, string}],
                         result = {res_atom, atom},
-                        args_example = ["Some string."],
-                        result_example = 'Some string'},
+                        args_example = ["Some string-then-atom."],
+                        result_example = 'Some string-then-atom'},
      #ejabberd_commands{name = command_test_rescode,
                         tags = [test],
                         desc = "Command to test rescode result",
@@ -370,8 +406,13 @@ all(Integer,
 %%%==================================
 %%%% hooks: run hooks
 
-register_hooks_commands() ->
-    ejabberd_commands:register_commands(?MODULE, get_hooks_commands_spec()).
+register_hooks_commands(Host) ->
+    case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
+        false ->
+            ejabberd_commands:register_commands(?MODULE, get_hooks_commands_spec());
+        true ->
+            ok
+    end.
 
 unregister_hooks_commands(Host) ->
     case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
@@ -430,16 +471,6 @@ run_hook_fold_host(Host) ->
 %%%==================================
 %%%% hooks: add global
 
-register_hooks() ->
-    ejabberd_hooks:add(example_hook_global, ?MODULE, example_hook_global_function1, 81),
-    ejabberd_hooks:add(example_hook_global, ?MODULE, example_hook_global_function2, 82),
-    ejabberd_hooks:add(example_hook_global, ?MODULE, example_hook_global_function3, 83).
-
-unregister_hooks() ->
-    ejabberd_hooks:delete(example_hook_global, ?MODULE, example_hook_global_function1, 81),
-    ejabberd_hooks:delete(example_hook_global, ?MODULE, example_hook_global_function2, 82),
-    ejabberd_hooks:delete(example_hook_global, ?MODULE, example_hook_global_function3, 83).
-
 example_hook_global_function1(Arg1, Arg2) ->
     io:format("~nexample_hook_global_function1: ~n"
               "  Arg1: ~p~n  Arg2: ~p~n"
@@ -468,15 +499,7 @@ register_hooks(Host) ->
                              Host,
                              ?MODULE,
                              example_hook_host_subs,
-                             init_args),
-    ejabberd_hooks:add(example_hook_host, Host, ?MODULE, example_hook_host_function1, 81),
-    ejabberd_hooks:add(example_hook_host, Host, ?MODULE, example_hook_host_function2, 82),
-    ejabberd_hooks:add(example_hook_host, Host, ?MODULE, example_hook_host_function3, 83).
-
-unregister_hooks(Host) ->
-    ejabberd_hooks:delete(example_hook_host, Host, ?MODULE, example_hook_host_function1, 81),
-    ejabberd_hooks:delete(example_hook_host, Host, ?MODULE, example_hook_host_function2, 82),
-    ejabberd_hooks:delete(example_hook_host, Host, ?MODULE, example_hook_host_function3, 83).
+                             init_args).
 
 example_hook_host_subs(InitArgs, Time, Host, Hook, Args) ->
     io:format("~nexample_hook_host_subs: ~n"
@@ -511,34 +534,6 @@ example_hook_host_function3(Arg1, Arg2) ->
 %%%==================================
 %%%% hooks: add global fold
 
-register_hooks_fold() ->
-    ejabberd_hooks:add(example_hook_fold_global,
-                       ?MODULE,
-                       example_hook_fold_global_function1,
-                       81),
-    ejabberd_hooks:add(example_hook_fold_global,
-                       ?MODULE,
-                       example_hook_fold_global_function2,
-                       82),
-    ejabberd_hooks:add(example_hook_fold_global,
-                       ?MODULE,
-                       example_hook_fold_global_function3,
-                       83).
-
-unregister_hooks_fold() ->
-    ejabberd_hooks:delete(example_hook_fold_global,
-                          ?MODULE,
-                          example_hook_fold_global_function1,
-                          81),
-    ejabberd_hooks:delete(example_hook_fold_global,
-                          ?MODULE,
-                          example_hook_fold_global_function2,
-                          82),
-    ejabberd_hooks:delete(example_hook_fold_global,
-                          ?MODULE,
-                          example_hook_fold_global_function3,
-                          83).
-
 example_hook_fold_global_function1(Acc0, Arg1, Arg2) ->
     io:format("~nexample_hook_fold_global_function1: ~n"
               "  Acc: ~p~n  Arg1: ~p~n  Arg2: ~p~n"
@@ -563,40 +558,6 @@ example_hook_fold_global_function3(Acc0, Arg1, Arg2) ->
 
 %%%==================================
 %%%% hooks: add host fold
-
-register_hooks_fold(Host) ->
-    ejabberd_hooks:add(example_hook_fold_host,
-                       Host,
-                       ?MODULE,
-                       example_hook_fold_host_function1,
-                       81),
-    ejabberd_hooks:add(example_hook_fold_host,
-                       Host,
-                       ?MODULE,
-                       example_hook_fold_host_function2,
-                       82),
-    ejabberd_hooks:add(example_hook_fold_host,
-                       Host,
-                       ?MODULE,
-                       example_hook_fold_host_function3,
-                       83).
-
-unregister_hooks_fold(Host) ->
-    ejabberd_hooks:delete(example_hook_fold_host,
-                          Host,
-                          ?MODULE,
-                          example_hook_fold_host_function1,
-                          81),
-    ejabberd_hooks:delete(example_hook_fold_host,
-                          Host,
-                          ?MODULE,
-                          example_hook_fold_host_function2,
-                          82),
-    ejabberd_hooks:delete(example_hook_fold_host,
-                          Host,
-                          ?MODULE,
-                          example_hook_fold_host_function3,
-                          83).
 
 example_hook_fold_host_function1(Acc0, Arg1, Arg2) ->
     io:format("~nexample_hook_fold_host_function1: ~n"
@@ -633,6 +594,86 @@ example_hook_fold_host_function3(Acc0, Arg1, Arg2) ->
 
 %%%==================================
 %%%% webadmin
+
+%%---------------
+%% WebAdmin Main
+
+webadmin_menu_main(Acc, Lang) ->
+    Acc ++ [{<<"example">>, translate:translate(Lang, ?T("Example Main"))}].
+
+webadmin_page_main(_, #request{path = [<<"example">>]} = R) ->
+    Title = [?XC(<<"h1">>, <<"Example Main Page">>)],
+    Get = [?X(<<"hr">>),
+           make_command(command_test_apiversion, R, [], []),
+           make_command(command_test_apizero, R, [], []),
+           make_command(command_test_apione, R, [], []),
+           ?X(<<"hr">>),
+           make_command(command_test_atom, R, [], []),
+           make_command(command_test_integer, R, [], []),
+           make_command(command_test_string, R, [], []),
+           make_command(command_test_binary, R, [], []),
+           ?X(<<"hr">>),
+           make_command(command_test_rescode, R, [], []),
+           make_command(command_test_restuple, R, [], []),
+           ?X(<<"hr">>),
+           make_command(command_test_tuple, R, [], []),
+           make_command(command_test_list, R, [], []),
+           make_command(command_test_list_tuple, R, [], []),
+           make_command(command_test_all, R, [], [])],
+    {stop, Title ++ Get};
+webadmin_page_main(Acc, _) ->
+    Acc.
+
+%%---------------
+%% WebAdmin Host
+
+webadmin_menu_host(Acc, _Host, Lang) ->
+    Acc ++ [{<<"example">>, translate:translate(Lang, ?T("Example Host"))}].
+
+webadmin_page_host(_, Host, #request{path = [<<"example">> | _RPath]}) ->
+    Title = [?XC(<<"h1">>, <<"Example Host Page: ", Host/binary>>)],
+    {stop, Title};
+webadmin_page_host(Acc, _, _) ->
+    Acc.
+
+%%--------------------
+%% WebAdmin Node
+
+webadmin_menu_node(Acc, _Node, _Lang) ->
+    Acc ++ [{<<"example">>, <<"Example Node">>}].
+
+webadmin_page_node(_, Node, #request{path = [<<"example">>]}) ->
+    NodeBin = atom_to_binary(Node),
+    Title = [?XC(<<"h1">>, <<"Example Node Page: ", NodeBin/binary>>)],
+    {stop, Title};
+webadmin_page_node(Acc, _, _) ->
+    Acc.
+
+%%--------------------
+%% WebAdmin Host User
+
+webadmin_menu_hostuser(Acc, _Host, _Username, _Lang) ->
+    Acc ++ [{<<"example-user">>, <<"Example User">>}].
+
+webadmin_page_hostuser(_, Host, User, #request{path = [<<"example-user">>]}) ->
+    Title = [?XC(<<"h1">>, <<"Example Host-User Page: ", Host/binary, " - ", User/binary>>)],
+    {stop, Title};
+webadmin_page_hostuser(Acc, _, _, _) ->
+    Acc.
+
+%%--------------------
+%% WebAdmin Host Node
+
+webadmin_menu_hostnode(Acc, _Host, _Username, _Lang) ->
+    Acc ++ [{<<"example-host-node">>, <<"Example Host Node">>}].
+
+webadmin_page_hostnode(_, Host, Node, #request{path = [<<"example-host-node">>]}) ->
+    NodeBin = atom_to_binary(Node),
+    Title =
+        [?XC(<<"h1">>, <<"Example Host-Node Page: ", Host/binary, " - ", NodeBin/binary>>)],
+    {stop, Title};
+webadmin_page_hostnode(Acc, _Host, _Node, _Request) ->
+    Acc.
 
 %%%==================================
 

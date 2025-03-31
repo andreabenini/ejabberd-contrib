@@ -62,6 +62,7 @@
 -include_lib("xmpp/include/xmpp.hrl").
 
 -define(COMMAND_TIMEOUT, timer:seconds(30)).
+-define(HTTPC_TIMEOUT, timer:seconds(3)).
 
 -type url() :: binary().
 -type filename() :: binary() | none.
@@ -84,7 +85,12 @@
 %%--------------------------------------------------------------------
 -spec start(binary(), gen_mod:opts()) -> ok | {error, any()}.
 start(Host, Opts) ->
-    ejabberd_commands:register_commands(get_commands_spec()),
+    case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
+        false ->
+            ejabberd_commands:register_commands(?MODULE, get_commands_spec());
+        true ->
+            ok
+    end,
     gen_mod:start_child(?MODULE, Host, Opts).
 
 -spec stop(binary()) -> ok | {error, any()}.
@@ -197,6 +203,9 @@ handle_call({check_body, URLs, JIDs, From}, _From,
 		     Result2
 	     end,
     {reply, {spam_filter, Result}, State2};
+handle_call({resolve_redirects, URLs}, _From, State) ->
+    ResolvedURLs = do_resolve_redirects(URLs, []),
+    {reply, {spam_filter, ResolvedURLs}, State};
 handle_call({reload_files, JIDsFile, URLsFile}, _From, State) ->
     {Result, State1} = reload_files(JIDsFile, URLsFile, State),
     {reply, {spam_filter, Result}, State1};
@@ -286,9 +295,14 @@ code_change(_OldVsn, #state{host = Host} = State, _Extra) ->
 %% Hook callbacks.
 %%--------------------------------------------------------------------
 -spec s2s_receive_packet({stanza() | drop, s2s_in_state()})
-      -> {stanza() | drop | {stop, drop}, s2s_in_state()}.
+      -> {stanza() | drop, s2s_in_state()} | {stop, {drop, s2s_in_state()}}.
 s2s_receive_packet({A, State}) ->
-    {sm_receive_packet(A), State}.
+    case sm_receive_packet(A) of
+        {stop, drop} ->
+            {stop, {drop, State}};
+        Result ->
+            {Result, State}
+    end.
 
 -spec sm_receive_packet(stanza() | drop) -> stanza() | drop | {stop, drop}.
 sm_receive_packet(drop = Acc) ->
@@ -385,7 +399,7 @@ check_from(Host, From) ->
 
 -spec check_body(binary(), jid(), binary()) -> ham | spam.
 check_body(Host, From, Body) ->
-    case {extract_urls(Body), extract_jids(Body)} of
+    case {extract_urls(Host, Body), extract_jids(Body)} of
 	{none, none} ->
 	    ?DEBUG("No JIDs/URLs found in message", []),
 	    ham;
@@ -401,15 +415,46 @@ check_body(Host, From, Body) ->
 	    end
     end.
 
--spec extract_urls(binary()) -> {urls, [url()]} | none.
-extract_urls(Body) ->
+-spec extract_urls(binary(), binary()) -> {urls, [url()]} | none.
+extract_urls(Host, Body) ->
     RE = <<"https?://\\S+">>,
     Options = [global, {capture, all, binary}],
     case re:run(Body, RE, Options) of
 	{match, Captured} when is_list(Captured) ->
-	    {urls, lists:flatten(Captured)};
+      Urls = resolve_redirects(Host, lists:flatten(Captured)),
+	    {urls, Urls};
 	nomatch ->
 	    none
+    end.
+
+-spec resolve_redirects(binary(), [url()]) -> [url()].
+resolve_redirects(Host, URLs) ->
+    Proc = get_proc_name(Host),
+    try gen_server:call(Proc, {resolve_redirects, URLs}) of
+        {spam_filter, ResolvedURLs} ->
+            ResolvedURLs
+    catch exit:{timeout, _} ->
+            ?WARNING_MSG("Timeout while resolving redirects: ~p", [URLs]),
+            URLs
+    end.
+
+-spec do_resolve_redirects([url()], [url()]) -> [url()].
+do_resolve_redirects([], Result) -> Result;
+do_resolve_redirects([URL | Rest], Acc) ->
+    case
+        httpc:request(get, {URL, [{"user-agent", "curl/8.7.1"}]},
+                      [{autoredirect, false}, {timeout, ?HTTPC_TIMEOUT}], [])
+    of
+        {ok, {{_, StatusCode, _}, Headers, _Body}} when StatusCode >= 300, StatusCode < 400 ->
+            Location = proplists:get_value("location", Headers),
+            case Location == undefined orelse lists:member(Location, Acc) of
+                true ->
+                    do_resolve_redirects(Rest, [URL | Acc]);
+                false ->
+                    do_resolve_redirects([Location | Rest], [URL | Acc])
+              end;
+        _Res ->
+            do_resolve_redirects(Rest, [URL | Acc])
     end.
 
 -spec extract_jids(binary()) -> {jids, [ljid()]} | none.

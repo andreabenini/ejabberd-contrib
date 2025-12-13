@@ -170,7 +170,7 @@ forward_push_message(Host, Jwt, Data, Ttl, #{
         undefined,
         Ttl
     ),
-    UrlPrefix = misc:expand_keyword(<<"@HOST@">>, guess_url_prefix(any), Host),
+    UrlPrefix = get_push_url(Host),
     %% XXX(RFC8030) indicate no support for receive acks / message storage
     {201,
         [
@@ -206,7 +206,7 @@ iq_handler(
     },
     Signed = jose_jwt:sign(Jwk, Jws, Jwt),
     {#{}, CompactSigned} = jose_jws:compact(Signed),
-    UrlPrefix = misc:expand_keyword(<<"@HOST@">>, guess_url_prefix(any), Host),
+    UrlPrefix = get_push_url(Host),
     xmpp:make_iq_result(IQ, #unified_push_registered{
         expiration = Expiration,
         endpoint = <<UrlPrefix/binary, "/", ?ENDPOINT_PUSH, "/", CompactSigned/binary>>
@@ -241,46 +241,32 @@ mod_opt_type(expiration) ->
     %% TODO is there an upper bound for the validity of the JWT token?
     econf:int(0, 86400); %% 60 * 60 * 24
 mod_opt_type(jwk) ->
-    econf:map(econf:binary(), econf:either(econf:binary(), econf:int())).
+    econf:map(econf:binary(), econf:either(econf:binary(), econf:int()));
+mod_opt_type(push_url) ->
+    econf:binary().
 
 -spec mod_options(binary()) -> [{atom(), any()}].
 mod_options(_Host) ->
     [
         {expiration, 60 * 15},
-        {jwk, jose_jwk:to_map(jose_jwk:generate_key({oct, 128}))}
+        {jwk, jose_jwk:to_map(jose_jwk:generate_key({oct, 128}))},
+        {push_url, <<"auto">>}
     ].
 
-%% Based on mod_host_meta's `get_auto_url` and `find_handler_port_path` functions
--spec guess_url_prefix(any | boolean()) -> undefined | binary().
-guess_url_prefix(Tls) ->
-    case
-        lists:filtermap(
-            fun
-                (
-                    {{Port, _, _}, ejabberd_http, #{tls := ThisTls, request_handlers := Handlers}}
-                ) when
-                    (Tls == any) or (Tls == ThisTls)
-                ->
-                    case lists:keyfind(?MODULE, 2, Handlers) of
-                        false -> false;
-                        {Path, ?MODULE} -> {true, {ThisTls, Port, Path}}
-                    end;
-                (_) ->
-                    false
-            end,
-            ets:tab2list(ejabberd_listener)
-        )
-    of
-        [] ->
-            undefined;
-        [{ThisTls, Port, Path} | _] ->
-            Protocol =
-                case ThisTls of
-                    false -> <<"http">>;
-                    true -> <<"https">>
-                end,
-            <<Protocol/binary, "://@HOST@:", (integer_to_binary(Port))/binary, "/",
-                (str:join(Path, <<"/">>))/binary>>
+-dialyzer({no_missing_calls, get_push_url/1}).
+get_push_url(Host) ->
+    case gen_mod:get_module_opt(Host, ?MODULE, push_url) of
+        <<"auto">> ->
+            AutoUrl = case erlang:function_exported(ejabberd_http, get_auto_url, 2) of
+                          false ->
+                              mod_host_meta:get_auto_url(any, ?MODULE);
+                          true ->
+                              [{_, Http} | _] = ejabberd_http:get_auto_urls(any, ?MODULE),
+                              Http
+                      end,
+            misc:expand_keyword(<<"@HOST@">>, AutoUrl, Host);
+        U when is_binary(U) ->
+            U
     end.
 
 -spec mod_doc() -> map().
@@ -294,7 +280,8 @@ mod_doc() ->
                 desc =>
                     ?T(
                         "Every generated push URL will be valid only "
-                        "for the specified interval, in seconds."
+                        "for the specified interval, in seconds. "
+                        "The default value is 15 minutes: '900'"
                     )
             }},
             {jwk, #{
@@ -304,7 +291,16 @@ mod_doc() ->
                         "Passed to `jose_jwk:from_map` to generate the "
                         "JSON Web Key (JWK) used when generating URLs."
                     )
-            }}
+            }},
+            {push_url,
+             #{value => "auto | PushURL",
+               desc =>
+                   ?T("Push URL to announce. "
+                      "The keyword '@HOST@' is replaced with the real virtual "
+                      "host name. "
+                      "If set to 'auto', it will build the URL of the first "
+                      "configured push request handler. "
+                      "The default value is 'auto'.")}}
         ],
         example => [
             "listen:",

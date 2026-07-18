@@ -241,7 +241,7 @@ mod_opt_type(expiration) ->
     %% TODO is there an upper bound for the validity of the JWT token?
     econf:int(0, 86400); %% 60 * 60 * 24
 mod_opt_type(jwk) ->
-    econf:map(econf:binary(), econf:either(econf:binary(), econf:int()));
+    econf:map(econf:binary(), econf:either(econf:binary(), econf:int()), [{return, map}]);
 mod_opt_type(push_url) ->
     econf:binary().
 
